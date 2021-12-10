@@ -76,6 +76,9 @@ dev/src/dev/nocommit/
 /frontend/src/cljs
 .shadow-cljs
 
+# Jenv file
+.java-version
+
 # lsp: ignore all but the config file
 .lsp/*
 !.lsp/config.edn

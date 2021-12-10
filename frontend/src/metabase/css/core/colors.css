@@ -2,24 +2,24 @@
  * NOTE: KEEP SYNCRONIZED WITH COLORS.JS
  */
 :root {
-  --color-brand: #509ee3;
-  --color-brand-light: #ddecfa;
-  --color-accent1: #88bf4d;
-  --color-accent2: #a989c5;
-  --color-accent3: #ef8c8c;
-  --color-accent4: #f9d45c;
+  --color-brand: #00b385;
+  --color-brand-light: #b4e9dc;
+  --color-accent1: #225796;
+  --color-accent2: #4a90e2;
+  --color-accent3: #f85f5a;
+  --color-accent4: #ffa608;
   --color-accent5: #f2a86f;
-  --color-accent6: #98d9d9;
-  --color-accent7: #7172ad;
-  --color-admin-navbar: #7172ad;
+  --color-accent6: #c8dbfb;
+  --color-accent7: #4acbaa;
+  --color-admin-navbar: #00b385;
   --color-white: #ffffff;
   --color-black: #2e353b;
-  --color-success: #84bb4c;
-  --color-error: #ed6e6e;
-  --color-warning: #f9cf48;
-  --color-text-dark: #4c5773;
-  --color-text-medium: #949aab;
-  --color-text-light: #b8bbc3;
+  --color-success: #4acbaa;
+  --color-error: #f85f5a;
+  --color-warning: #ffa608;
+  --color-text-dark: #2a2a2a;
+  --color-text-medium: #727272;
+  --color-text-light: #a3a3a3;
   --color-text-white: #ffffff;
   --color-bg-black: #2e353b;
   --color-bg-dark: #93a1ab;
@@ -31,11 +31,11 @@
   --color-border: #f0f0f0;
 
   /* Saturated colors for the SQL editor. Shouldn't be used elsewhere since they're not white-labelable. */
-  --color-saturated-blue: #2d86d4;
-  --color-saturated-green: #70a63a;
+  --color-saturated-blue: #4a90e2;
+  --color-saturated-green: #4acbaa;
   --color-saturated-purple: #885ab1;
-  --color-saturated-red: #ed6e6e;
-  --color-saturated-yellow: #f9cf48;
+  --color-saturated-red: #f85f5a;
+  --color-saturated-yellow: #ffa608;
 
   /* night mode colors */
   --night-mode-color: color-mod(var(--color-text-white) alpha(-14%));
