@@ -12,16 +12,16 @@
   font-family: "Lato";
   font-style: normal;
   font-weight: 700;
-  src: local("Lato Bold"), local("Lato-Bold"),url("~fonts/FilsonPro/FilsonPro-Bold.woff")
-      format("woff"),
+  src: local("Lato Bold"), local("Lato-Bold"),
+    url("~fonts/FilsonPro/FilsonPro-Bold.woff") format("woff");
 }
 /* lato-900 - latin */
 @font-face {
   font-family: "Lato";
   font-style: normal;
   font-weight: 900;
-  src: local("Lato Black"), local("Lato-Black"),url("~fonts/FilsonPro/FilsonPro-Bold.woff")
-  format("woff"),
+  src: local("Lato Black"), local("Lato-Black"),
+    url("~fonts/FilsonPro/FilsonPro-Bold.woff") format("woff");
 }
 
 :root {
