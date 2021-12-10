@@ -33,7 +33,7 @@
   /* Saturated colors for the SQL editor. Shouldn't be used elsewhere since they're not white-labelable. */
   --color-saturated-blue: #4a90e2;
   --color-saturated-green: #4acbaa;
-  --color-saturated-purple: gray;
+  --color-saturated-purple: #885AB1;
   --color-saturated-red: #f85f5a;
   --color-saturated-yellow: #ffa608;
 
