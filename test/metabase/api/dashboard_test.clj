@@ -1650,6 +1650,7 @@
                     (is (= "You don't have permissions to do that."
                            (mt/user-http-request :rasta :post 403 (url))))))))))))))
 
+;; see also [[metabase.query-processor.dashboard-test]]
 (deftest dashboard-card-query-parameters-test
   (testing "POST /api/dashboard/:dashboard-id/card/:card-id/query"
     (with-chain-filter-fixtures [{{dashboard-id :id} :dashboard, {card-id :id} :card, {dashcard-id :id} :dashcard}]
@@ -1666,13 +1667,7 @@
                              (mt/user-http-request :rasta :post 202 url
                                                    {:parameters [{:id    "_PRICE_"
                                                                   :type  :number/=
-                                                                  :value [1 2 3]}]}))))
-              (testing :number/<=
-                (is (schema= (dashboard-card-query-expected-results-schema :row-count 94)
-                             (mt/user-http-request :rasta :post 202 url
-                                                   {:parameters [{:id    "_PRICE_"
-                                                                  :type  :number/<=
-                                                                  :value [3]}]}))))))
+                                                                  :value [1 2 3]}]}))))))
           (testing "Should return error if parameter doesn't exist"
             (is (= "Dashboard does not have a parameter with ID \"_THIS_PARAMETER_DOES_NOT_EXIST_\"."
                    (mt/user-http-request :rasta :post 400 url

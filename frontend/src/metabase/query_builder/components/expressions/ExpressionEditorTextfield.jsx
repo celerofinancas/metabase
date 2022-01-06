@@ -255,16 +255,18 @@ export default class ExpressionEditorTextfield extends React.Component {
     this.setState({ errorMessage });
 
     // whenever our input blurs we push the updated expression to our parent if valid
-    const expression = this.compileExpression();
-    if (expression) {
-      if (!isExpression(expression)) {
-        console.warn("isExpression=false", expression);
-      }
-      this.props.onChange(expression);
-    } else if (errorMessage) {
+    if (errorMessage) {
       this.props.onError(errorMessage);
     } else {
-      this.props.onError({ message: t`Invalid expression` });
+      const expression = this.compileExpression();
+      if (expression) {
+        if (!isExpression(expression)) {
+          console.warn("isExpression=false", expression);
+        }
+        this.props.onChange(expression);
+      } else {
+        this.props.onError({ message: t`Invalid expression` });
+      }
     }
   };
 
@@ -307,7 +309,7 @@ export default class ExpressionEditorTextfield extends React.Component {
   };
 
   handleExpressionChange(source) {
-    this.setState({ source });
+    this.setState({ source, errorMessage: null });
     if (this.props.onBlankChange) {
       this.props.onBlankChange(source.length === 0);
     }
@@ -329,6 +331,26 @@ export default class ExpressionEditorTextfield extends React.Component {
       suggestions: suggestions || [],
       helpText,
     });
+  }
+
+  errorAsMarkers(errorMessage = null) {
+    if (errorMessage) {
+      const { pos, len } = errorMessage;
+      // Because not every error message offers location info (yet)
+      if (typeof pos === "number") {
+        return [
+          {
+            startRow: 0,
+            startCol: pos,
+            endRow: 0,
+            endCol: pos + len,
+            className: "error",
+            type: "text",
+          },
+        ];
+      }
+    }
+    return [];
   }
 
   commands = [
@@ -373,6 +395,7 @@ export default class ExpressionEditorTextfield extends React.Component {
             commands={this.commands}
             ref={this.input}
             value={source}
+            markers={this.errorAsMarkers(errorMessage)}
             focus={true}
             highlightActiveLine={false}
             wrapEnabled={true}
@@ -400,7 +423,7 @@ export default class ExpressionEditorTextfield extends React.Component {
             highlightedIndex={this.state.highlightedSuggestionIndex}
           />
         </EditorContainer>
-        <ErrorMessage error={errorMessage} />
+        {!isFocused && <ErrorMessage error={errorMessage} />}
         <HelpText helpText={this.state.helpText} width={this.props.width} />
       </React.Fragment>
     );
