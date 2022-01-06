@@ -2,7 +2,6 @@
   (:require [clojure.set :as set]
             [metabase.db.util :as mdb.u]
             [metabase.events :as events]
-            [metabase.mbql.normalize :as normalize]
             [metabase.models.card :refer [Card]]
             [metabase.models.dashboard-card-series :refer [DashboardCardSeries]]
             [metabase.models.interface :as i]
@@ -36,21 +35,11 @@
                   :visualization_settings {}}]
     (merge defaults dashcard)))
 
-(defn normalize-parameter-mappings
-  "Normalize `parameter-mappings` when coming out of the application database or in via an API request."
-  [parameter-mappings]
-  (or (normalize/normalize-fragment [:parameters] parameter-mappings)
-      []))
-
-(models/add-type! ::parameter-mappings
-  :in  (comp i/json-in normalize-parameter-mappings)
-  :out (comp (i/catch-normalization-exceptions normalize-parameter-mappings) i/json-out-with-keywordization))
-
 (u/strict-extend (class DashboardCard)
   models/IModel
   (merge models/IModelDefaults
          {:properties  (constantly {:timestamped? true})
-          :types       (constantly {:parameter_mappings     ::parameter-mappings
+          :types       (constantly {:parameter_mappings     :parameters-list
                                     :visualization_settings :visualization-settings})
           :pre-insert  pre-insert
           :post-select #(set/rename-keys % {:sizex :sizeX, :sizey :sizeY})})
@@ -159,10 +148,18 @@
        (update-dashboard-card-series! dashboard-card series)))
     (retrieve-dashboard-card id)))
 
+(def ParamMapping
+  "Schema for a parameter mapping as it would appear in the DashboardCard `:parameter_mappings` column."
+  {:parameter_id su/NonBlankString
+   ;; TODO -- validate `:target` as well... breaks a few tests tho so those will have to be fixed
+   #_:target       #_s/Any
+   s/Keyword     s/Any})
+
 (def ^:private NewDashboardCard
   {:dashboard_id                            su/IntGreaterThanZero
    (s/optional-key :card_id)                (s/maybe su/IntGreaterThanZero)
-   (s/optional-key :parameter_mappings)     (s/maybe [su/Map])
+   ;; TODO - use ParamMapping. Breaks too many tests right now tho
+   (s/optional-key :parameter_mappings)     (s/maybe [#_ParamMapping su/Map])
    (s/optional-key :visualization_settings) (s/maybe su/Map)
    ;; TODO - make the rest of the options explicit instead of just allowing whatever for other keys
    s/Keyword                                s/Any})

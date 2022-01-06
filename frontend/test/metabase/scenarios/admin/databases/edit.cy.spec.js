@@ -15,7 +15,7 @@ describe("scenarios > admin > databases > edit", () => {
     cy.route("PUT", "/api/database/*").as("databaseUpdate");
   });
 
-  describe("Connection tab", () => {
+  describe("Connection settings", () => {
     it("shows the connection settings for sample dataset correctly", () => {
       cy.visit("/admin/databases/1");
       cy.findByLabelText("Display name").should("have.value", "Sample Dataset");
@@ -27,6 +27,7 @@ describe("scenarios > admin > databases > edit", () => {
     it("lets you modify the connection settings", () => {
       cy.visit("/admin/databases/1");
 
+      cy.findByText("Show advanced options").click();
       cy.findByLabelText("Choose when syncs and scans happen").click();
 
       cy.findByText("Save changes").click();
@@ -37,16 +38,12 @@ describe("scenarios > admin > databases > edit", () => {
       );
 
       cy.findByText("Success");
-
-      // findByText the tabs
-      cy.reload();
-      cy.findByText("Connection");
-      cy.findByText("Scheduling");
     });
 
     it("`auto_run_queries` toggle should be ON by default for `SAMPLE_DATASET`", () => {
       cy.visit("/admin/databases/1");
 
+      cy.findByText("Show advanced options").click();
       cy.findByLabelText("Rerun queries for simple explorations").should(
         "have.attr",
         "aria-checked",
@@ -63,6 +60,7 @@ describe("scenarios > admin > databases > edit", () => {
       cy.visit("/admin/databases/1");
 
       cy.log("Reported failing on v0.36.4");
+      cy.findByText("Show advanced options").click();
       cy.findByLabelText("Rerun queries for simple explorations").should(
         "have.attr",
         "aria-checked",
@@ -78,6 +76,7 @@ describe("scenarios > admin > databases > edit", () => {
       it("allows to manage cache ttl", () => {
         cy.visit("/admin/databases/1");
 
+        cy.findByText("Show advanced options").click();
         cy.findByText("Use instance default (TTL)").click();
         popover()
           .findByText("Custom")
@@ -93,9 +92,9 @@ describe("scenarios > admin > databases > edit", () => {
           expect(response.body.cache_ttl).to.equal(32);
 
           cy.visit("/admin/databases");
-          cy.findByText("Sample Dataset").click();
+          cy.findByTextEnsureVisible("Sample Dataset").click();
 
-          cy.findByText("Custom").click();
+          cy.findByTextEnsureVisible("Custom").click();
           popover()
             .findByText("Use instance default (TTL)")
             .click();
@@ -109,7 +108,7 @@ describe("scenarios > admin > databases > edit", () => {
     });
   });
 
-  describe("Scheduling tab", () => {
+  describe("Scheduling settings", () => {
     beforeEach(() => {
       // Turn on scheduling without relying on the previous test(s)
       cy.request("PUT", "/api/database/1", {
@@ -123,8 +122,7 @@ describe("scenarios > admin > databases > edit", () => {
     it("shows the initial scheduling settings correctly", () => {
       cy.visit("/admin/databases/1");
 
-      cy.findByText("Scheduling").click();
-
+      cy.findByText("Show advanced options").click();
       cy.findByText("Database syncing")
         .closest(".Form-field")
         .findByText("Hourly");
@@ -137,8 +135,7 @@ describe("scenarios > admin > databases > edit", () => {
     it("lets you change the metadata_sync period", () => {
       cy.visit("/admin/databases/1");
 
-      cy.findByText("Scheduling").click();
-
+      cy.findByText("Show advanced options").click();
       cy.findByText("Database syncing")
         .closest(".Form-field")
         .as("sync");
@@ -164,7 +161,7 @@ describe("scenarios > admin > databases > edit", () => {
 
     it("lets you change the cache_field_values perid", () => {
       cy.visit("/admin/databases/1");
-      cy.findByText("Scheduling").click();
+      cy.findByText("Show advanced options").click();
 
       cy.findByText("Regularly, on a schedule")
         .parent()
@@ -186,7 +183,7 @@ describe("scenarios > admin > databases > edit", () => {
 
     it("lets you change the cache_field_values to 'Only when adding a new filter widget'", () => {
       cy.visit("/admin/databases/1");
-      cy.findByText("Scheduling").click();
+      cy.findByText("Show advanced options").click();
 
       cy.findByText("Only when adding a new filter widget").click();
       cy.findByText("Save changes").click();
@@ -198,7 +195,7 @@ describe("scenarios > admin > databases > edit", () => {
 
     it("lets you change the cache_field_values to Never", () => {
       cy.visit("/admin/databases/1");
-      cy.findByText("Scheduling").click();
+      cy.findByText("Show advanced options").click();
 
       cy.findByText("Never, I'll do this manually if I need to").click();
       cy.findByText("Save changes").click();
