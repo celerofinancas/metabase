@@ -236,12 +236,13 @@ export const getRoutes = store => (
           <Route path=":slug/notebook" component={QueryBuilder} />
         </Route>
 
-        <Route path="/dataset">
+        <Route path="/model">
           <IndexRoute component={QueryBuilder} />
           <Route path="notebook" component={QueryBuilder} />
           <Route path=":slug" component={QueryBuilder} />
           <Route path=":slug/notebook" component={QueryBuilder} />
           <Route path=":slug/query" component={QueryBuilder} />
+          <Route path=":slug/metadata" component={QueryBuilder} />
         </Route>
 
         <Route path="browse" component={BrowseApp}>
