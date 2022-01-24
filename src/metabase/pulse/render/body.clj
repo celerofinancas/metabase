@@ -21,8 +21,23 @@
             [schema.core :as s])
   (:import [java.text DecimalFormat DecimalFormatSymbols]))
 
+(def ^:private card-error-rendered-info
+  "Default rendered-info map when there is an error running a card on the card run.
+  Is a delay due to the call to `trs`."
+  (delay {:attachments
+          nil
+
+          :content
+          [:div {:style (style/style
+                         (style/font-style)
+                         {:color       style/color-error
+                          :font-weight 700
+                          :padding     :16px})}
+           (trs "There was a problem with this question.")]}))
+
 (def ^:private error-rendered-info
-  "Default rendered-info map when there is an error displaying a card. Is a delay due to the call to `trs`."
+  "Default rendered-info map when there is an error displaying a card on the static viz side.
+  Is a delay due to the call to `trs`."
   (delay {:attachments
           nil
 
@@ -404,7 +419,7 @@
   [_ render-type _timezone-id :- (s/maybe s/Str) card _ {:keys [rows] :as data}]
   (let [[x-axis-rowfn y-axis-rowfn] (common/graphing-column-row-fns card data)
         rows                        (map (juxt (comp str x-axis-rowfn) y-axis-rowfn)
-                                         (common/non-nil-rows x-axis-rowfn y-axis-rowfn rows))
+                                         (common/row-preprocess x-axis-rowfn y-axis-rowfn rows))
         slice-threshold             (or (get-in card [:visualization_settings :pie.slice_threshold])
                                         2.5)
         {:keys [rows percentages]}  (donut-info slice-threshold rows)
@@ -424,7 +439,7 @@
             (for [label (map first rows)]
               [:div {:style (style/style {:float       :left :margin-right "12px"
                                           :font-family "Lato, sans-serif"
-                                          :font-size   "24px"})}
+                                          :font-size   "16px"})}
                [:span {:style (style/style {:color (legend-colors label)})}
                 "•"]
                [:span {:style (style/style {:margin-left "6px"})}
@@ -489,7 +504,7 @@
         row-seqs      (for [[row-seq rowfnpair] (map vector row-seqs rowfns)]
                         (let [[x-rowfn y-rowfn] rowfnpair]
                           (map (juxt x-rowfn y-rowfn)
-                               (common/non-nil-rows x-rowfn y-rowfn row-seq))))
+                               (common/row-preprocess x-rowfn y-rowfn row-seq))))
         col-seqs      (map :cols multi-data)
         first-rowfns  (first rowfns)
         [x-col y-col] ((juxt (first first-rowfns) (second first-rowfns)) (first col-seqs))
@@ -654,7 +669,7 @@
      :render/text (str value)}))
 
 (s/defmethod render :smartscalar :- common/RenderedPulseCard
-  [_ _ timezone-id _card _ {:keys [cols _rows insights viz-settings]}]
+  [_ _ timezone-id _card _ {:keys [cols rows insights viz-settings] :as data}]
   (letfn [(col-of-type [t c] (or (isa? (:effective_type c) t)
                                  ;; computed and agg columns don't have an effective type
                                  (isa? (:base_type c) t)))
@@ -684,7 +699,17 @@
            :render/text (str value "\n"
                              adj " " (percentage last-change) "."
                              " Was " previous " last " (format-unit unit))})
-        @error-rendered-info))))
+        ;; In other words, defaults to plain scalar if we don't have actual changes
+        {:attachments nil
+         :content     [:div
+                       [:div {:style (style/style (style/scalar-style))}
+                        (h last-value)]
+                       [:p {:style (style/style {:color         style/color-text-medium
+                                                 :font-size     :16px
+                                                 :font-weight   700
+                                                 :padding-right :16px})}
+                        (trs "Nothing to compare to.")]]
+         :render/text (str last-value "\n" (trs "Nothing to compare to."))}))))
 
 (s/defmethod render :sparkline :- common/RenderedPulseCard
   [_ render-type timezone-id card _ {:keys [_rows cols viz-settings] :as data}]
@@ -715,25 +740,25 @@
       [:img {:style (style/style {:display :block
                                   :width   :100%})
              :src   (:image-src image-bundle)}]
-      [:table
-       [:tr
-        [:td {:style (style/style {:color         style/color-text-dark
-                                   :font-size     :24px
-                                   :font-weight   700
-                                   :padding-right :16px})}
-         (first values)]
-        [:td {:style (style/style {:color       style/color-gray-3
-                                   :font-size   :24px
-                                   :font-weight 700})}
-         (second values)]]
+      [:table {:style (style/style {:border-spacing :0px})}
        [:tr
         [:td {:style (style/style {:color         style/color-text-dark
                                    :font-size     :16px
                                    :font-weight   700
                                    :padding-right :16px})}
+         (first values)]
+        [:td {:style (style/style {:color       style/color-gray-3
+                                   :font-size   :16px
+                                   :font-weight 700})}
+         (second values)]]
+       [:tr
+        [:td {:style (style/style {:color         style/color-text-dark
+                                   :font-size     :12px
+                                   :font-weight   700
+                                   :padding-right :16px})}
          (first labels)]
         [:td {:style (style/style {:color     style/color-gray-3
-                                   :font-size :16px})}
+                                   :font-size :12px})}
          (second labels)]]]]}))
 
 (s/defmethod render :waterfall :- common/RenderedPulseCard
@@ -742,10 +767,8 @@
          y-axis-rowfn] (common/graphing-column-row-fns card data)
         [x-col y-col]  ((juxt x-axis-rowfn y-axis-rowfn) cols)
         rows           (map (juxt x-axis-rowfn y-axis-rowfn)
-                            (common/non-nil-rows x-axis-rowfn y-axis-rowfn rows))
+                            (common/row-preprocess x-axis-rowfn y-axis-rowfn rows))
         last-rows      (reverse (take-last 2 rows))
-        values         (for [row last-rows]
-                         (some-> row y-axis-rowfn common/format-number))
         labels         (x-and-y-axis-label-info x-col y-col viz-settings)
         render-fn      (if (isa? (-> cols x-axis-rowfn :effective_type) :type/Temporal)
                          js-svg/timelineseries-waterfall
@@ -767,7 +790,7 @@
 (s/defmethod render :funnel :- common/RenderedPulseCard
   [_ render-type timezone-id card _ {:keys [rows cols viz-settings] :as data}]
   ;; x-axis-rowfn is always first, y-axis-rowfn is always second
-  (let [rows          (common/non-nil-rows first second rows)
+  (let [rows          (common/row-preprocess first second rows)
         [x-col y-col] cols
         settings      (->js-viz x-col y-col viz-settings)
         settings      (assoc settings
@@ -831,6 +854,10 @@
     [:br]
     (trs "Please view this card in Metabase.")]})
 
-(s/defmethod render :error :- common/RenderedPulseCard
+(s/defmethod render :card-error :- common/RenderedPulseCard
+  [_ _ _ _ _ _]
+  @card-error-rendered-info)
+
+(s/defmethod render :render-error :- common/RenderedPulseCard
   [_ _ _ _ _ _]
   @error-rendered-info)

@@ -250,6 +250,14 @@
                                                {:cols test-columns-with-date-semantic-type :rows test-data}
                                                (count test-columns))))))
 
+(deftest error-test
+  (testing "renders error"
+    (= "An error occurred while displaying this card."
+       (-> (body/render :render-error nil nil nil nil nil) :content last)))
+  (testing "renders card error"
+    (= "There was a problem with this question."
+       (-> (body/render :card-error nil nil nil nil nil) :content last))))
+
 (defn- render-scalar-value [results]
   (-> (body/render :scalar nil pacific-tz nil nil results)
       :content
@@ -314,9 +322,25 @@
                                  :unit :month
                                  :last-change 1.333333
                                  :col "value"
-                                 :last-value 40.0}]}]
+                                 :last-value 40.0}]}
+            ;; by "dumb" it is meant "without nonnil insights"
+            dumbres {:cols [{:name         "value",
+                             :display_name "VALUE",
+                             :base_type    :type/Decimal}
+                            {:name           "time",
+                             :display_name   "TIME",
+                             :base_type      :type/DateTime
+                             :effective_type :type/DateTime}]
+                     :rows [[20.0 :month-before]]
+                     :insights [{:previous-value nil
+                                 :unit nil
+                                 :last-change nil
+                                 :col "value"
+                                 :last-value 20.0}]}]
         (is (= "40.00\nUp 133.33%. Was 30.00 last month"
                (:render/text (body/render :smartscalar nil pacific-tz nil nil results))))
+        (is (= "20.0\nNothing to compare to."
+               (:render/text (body/render :smartscalar nil pacific-tz nil nil dumbres))))
         (is (schema= {:attachments (s/eq nil)
                       :content     (s/pred vector? "hiccup vector")
                       :render/text (s/eq "40.00\nUp 133.33%. Was 30.00 last month")}
@@ -481,6 +505,10 @@
     (is (has-inline-image?
          (render-waterfall {:cols default-columns
                             :rows [[10.0 1] [5.0 10] [2.50 20] [1.25 30]]}))))
+  (testing "Render a waterfall graph with bigdec, bigint values for the x and y axis"
+    (is (has-inline-image?
+          (render-waterfall {:cols default-columns
+                             :rows [[10.0M 1M] [5.0 10N] [2.50 20N] [1.25M 30]]}))))
   (testing "Check to make sure we allow nil values for the y-axis"
     (is (has-inline-image?
          (render-waterfall {:cols default-columns
