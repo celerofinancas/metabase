@@ -9,7 +9,7 @@ describe("scenarios > admin > databases > list", () => {
 
   it("should let you see databases in list view", () => {
     cy.visit("/admin/databases");
-    cy.findByText("Sample Dataset");
+    cy.findByText("Sample Database");
     cy.findByText("H2");
   });
 
@@ -20,7 +20,7 @@ describe("scenarios > admin > databases > list", () => {
 
   it("should let you view a database's detail view", () => {
     cy.visit("/admin/databases");
-    cy.contains("Sample Dataset").click();
+    cy.contains("Sample Database").click();
     cy.url().should("match", /\/admin\/databases\/\d+$/);
   });
 
@@ -33,7 +33,7 @@ describe("scenarios > admin > databases > list", () => {
 
   it("should let you access edit page a database", () => {
     cy.visit("/admin/databases");
-    cy.contains("Sample Dataset").click();
+    cy.contains("Sample Database").click();
     cy.url().should("match", /\/admin\/databases\/1$/);
   });
 
@@ -41,9 +41,9 @@ describe("scenarios > admin > databases > list", () => {
     cy.route("DELETE", "/api/database/1").as("delete");
 
     cy.visit("/admin/databases");
-    cy.get("table").should("contain", "Sample Dataset");
+    cy.get("table").should("contain", "Sample Database");
 
-    cy.contains("Sample Dataset")
+    cy.contains("Sample Database")
       .closest("tr")
       .contains("Delete")
       .click();
@@ -53,24 +53,24 @@ describe("scenarios > admin > databases > list", () => {
       .should("be.disabled");
     cy.get(".ModalBody input")
       .clear()
-      .type("Sample Dataset");
+      .type("Sample Database");
 
     cy.get(".ModalBody")
       .contains("button", "Delete")
       .click();
     cy.wait("@delete");
 
-    cy.get("table").should("not.contain", "Sample Dataset");
+    cy.get("table").should("not.contain", "Sample Database");
   });
 
-  it("should let you bring back the sample dataset", () => {
-    cy.route("POST", "/api/database/sample_dataset").as("sample_dataset");
+  it("should let you bring back the sample database", () => {
+    cy.route("POST", "/api/database/sample_database").as("sample_database");
 
     cy.request("DELETE", "/api/database/1").as("delete");
     cy.visit("/admin/databases");
-    cy.contains("Bring the sample dataset back").click();
-    cy.wait("@sample_dataset");
-    cy.contains("Sample Dataset").click();
+    cy.contains("Bring the sample database back").click();
+    cy.wait("@sample_database");
+    cy.contains("Sample Database").click();
     cy.url().should("match", /\/admin\/databases\/\d+$/);
   });
 
@@ -86,14 +86,20 @@ describe("scenarios > admin > databases > list", () => {
 
     cy.visit("/admin");
 
-    const message = `You’re using a database driver which is now deprecated and will be removed in the next release.`;
-    cy.findByText(message);
-    cy.findByText("Show me").click();
-    cy.findByText("Sample Dataset");
-    cy.findByText(message).should("not.exist");
+    cy.findByRole("status").within(() => {
+      cy.findByText("Database driver");
+      cy.findByText(/which is now deprecated/);
+      cy.findByText("Database driver").click();
+    });
 
-    cy.reload();
-    cy.findByText("Metabase Admin");
-    cy.findByText(message).should("not.exist");
+    cy.findByRole("table").within(() => {
+      cy.findByText("Sample Database");
+    });
+
+    cy.findByRole("status").within(() => {
+      cy.findByLabelText("close icon").click();
+    });
+
+    cy.findByRole("status").should("not.exist");
   });
 });
