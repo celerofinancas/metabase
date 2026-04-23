@@ -1,1 +1,1 @@
-export { default } from "./DatabaseStatusSmall";
+export * from "./DatabaseStatusSmall";

@@ -1,7 +1,9 @@
 (ns metabase.query-processor.streaming.interface
-  (:require [potemkin.types :as p.types]))
+  (:require
+   [potemkin.types :as p.types]))
+
 (defmulti stream-options
-  "Options for the streaming response for this specific stream type. See `metabase.async.streaming-response` for all
+  "Options for the streaming response for this specific stream type. See `metabase.server.streaming-response` for all
   available options."
   {:arglists '([export-format] [export-format filename-prefix])}
   (fn ([export-format & _] (keyword export-format))))
@@ -20,9 +22,10 @@
   (finish! [this final-metadata]
     "Write anything needed after writing the last row. `final-metadata` is the final, complete metadata available
     after reducing all rows. Very important: This method *must* `.close` the underlying OutputStream when it is
-    finshed."))
+    finished."))
 
 (defmulti streaming-results-writer
   "Given a `export-format` and `java.io.Writer`, return an object that implements `StreamingResultsWriter`."
   {:arglists '(^metabase.query_processor.streaming.interface.StreamingResultsWriter [export-format ^java.io.OutputStream os])}
-  (fn [export-format _] (keyword export-format)))
+  (fn [export-format _os]
+    (keyword export-format)))

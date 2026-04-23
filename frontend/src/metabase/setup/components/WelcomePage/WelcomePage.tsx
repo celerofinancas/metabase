@@ -1,45 +1,54 @@
-import React, { useEffect } from "react";
+import { useEffect } from "react";
+import { useTimeout } from "react-use";
 import { t } from "ttag";
-import LogoIcon from "metabase/components/LogoIcon";
-import SetupHelp from "../SetupHelp";
+
+import { DefaultLogoIcon } from "metabase/common/components/LogoIcon";
+import { useDispatch, useSelector } from "metabase/utils/redux";
+
+import { goToNextStep, loadDefaults } from "../../actions";
+import { LOCALE_TIMEOUT } from "../../constants";
+import { getIsLocaleLoaded } from "../../selectors";
+import { SetupHelp } from "../SetupHelp";
+
 import {
-  PageRoot,
-  PageMain,
-  PageTitle,
   PageBody,
   PageButton,
+  PageMain,
+  PageRoot,
+  PageTitle,
 } from "./WelcomePage.styled";
 
-export interface WelcomePageProps {
-  onStepShow: () => void;
-  onStepSubmit: () => void;
-}
+export const WelcomePage = (): JSX.Element | null => {
+  const [isElapsed] = useTimeout(LOCALE_TIMEOUT);
+  const isLocaleLoaded = useSelector(getIsLocaleLoaded);
+  const dispatch = useDispatch();
 
-const WelcomePage = ({
-  onStepShow,
-  onStepSubmit,
-}: WelcomePageProps): JSX.Element => {
+  const handleStepSubmit = () => {
+    dispatch(goToNextStep());
+  };
+
   useEffect(() => {
-    onStepShow();
-  }, [onStepShow]);
+    dispatch(loadDefaults());
+  }, [dispatch]);
+
+  if (!isElapsed() && !isLocaleLoaded) {
+    return null;
+  }
 
   return (
-    <PageRoot>
+    <PageRoot data-testid="welcome-page">
       <PageMain>
-        <LogoIcon height={118} />
+        <DefaultLogoIcon height={118} />
         <PageTitle>{t`Welcome to Metabase`}</PageTitle>
         <PageBody>
           {t`Looks like everything is working.`}{" "}
-          {`Now let’s get to know you, connect to your data, and start finding you some answers!`}
+          {t`Now let’s get to know you, connect to your data, and start finding you some answers!`}
         </PageBody>
-        <PageButton
-          primary
-          onClick={onStepSubmit}
-        >{t`Let's get started`}</PageButton>
+        <PageButton primary autoFocus onClick={handleStepSubmit}>
+          {t`Let's get started`}
+        </PageButton>
       </PageMain>
       <SetupHelp />
     </PageRoot>
   );
 };
-
-export default WelcomePage;

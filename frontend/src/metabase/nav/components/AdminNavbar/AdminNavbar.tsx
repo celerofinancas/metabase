@@ -1,85 +1,157 @@
-import React from "react";
+import { useClickOutside } from "@mantine/hooks";
+import { useState } from "react";
+import { push } from "react-router-redux";
 import { t } from "ttag";
-import { PLUGIN_ADMIN_NAV_ITEMS } from "metabase/plugins";
-import MetabaseSettings from "metabase/lib/settings";
-import { AdminNavItem } from "./AdminNavItem";
+
+import { LogoIcon } from "metabase/common/components/LogoIcon";
+import { useRegisterShortcut } from "metabase/palette/hooks/useRegisterShortcut";
+import { PLUGIN_SECURITY_CENTER } from "metabase/plugins";
+import type { AdminPath } from "metabase/redux/store";
+import { getIsPaidPlan } from "metabase/selectors/settings";
+import { getUserIsAdmin } from "metabase/selectors/user";
+import { Button, Icon } from "metabase/ui";
+import { useDispatch, useSelector } from "metabase/utils/redux";
+
+import { AppSwitcher } from "../AppSwitcher";
 import StoreLink from "../StoreLink";
-import LogoIcon from "metabase/components/LogoIcon";
+
+import { AdminNavItem } from "./AdminNavItem";
+import { AdminNavLink } from "./AdminNavItem.styled";
+import AdminNavCS from "./AdminNavbar.module.css";
 import {
-  AdminExitLink,
+  AdminButtons,
   AdminLogoContainer,
   AdminLogoLink,
   AdminLogoText,
+  AdminMobileNavBarItems,
+  AdminMobileNavbar,
   AdminNavbarItems,
   AdminNavbarRoot,
+  MobileHide,
 } from "./AdminNavbar.styled";
 
 interface AdminNavbarProps {
   path: string;
+  adminPaths: AdminPath[];
 }
 
-export const AdminNavbar = ({ path: currentPath }: AdminNavbarProps) => {
+export const AdminNavbar = ({
+  path: currentPath,
+  adminPaths,
+}: AdminNavbarProps) => {
+  const isPaidPlan = useSelector(getIsPaidPlan);
+  const isAdmin = useSelector(getUserIsAdmin);
+  const dispatch = useDispatch();
+
+  useRegisterShortcut(
+    [
+      {
+        id: "admin-change-tab",
+        perform: (_, event) => {
+          if (!event?.key) {
+            return;
+          }
+          const key = parseInt(event.key);
+          const path = adminPaths[key - 1]?.path;
+
+          if (path) {
+            dispatch(push(path));
+          }
+        },
+      },
+    ],
+    [adminPaths],
+  );
+
   return (
-    <AdminNavbarRoot className="Nav">
-      <AdminLogoLink to="/admin" data-metabase-event={"Navbar;Logo"}>
+    <AdminNavbarRoot
+      data-element-id="navbar-root"
+      data-testid="admin-navbar"
+      aria-label={t`Navigation bar`}
+    >
+      <AdminLogoLink to="/admin">
         <AdminLogoContainer>
-          <LogoIcon className="text-brand my2" dark />
+          <LogoIcon dark />
+          {/* eslint-disable-next-line metabase/no-literal-metabase-strings -- Metabase settings */}
           <AdminLogoText>{t`Metabase Admin`}</AdminLogoText>
         </AdminLogoContainer>
       </AdminLogoLink>
 
-      <AdminNavbarItems>
-        <AdminNavItem
-          name={t`Settings`}
-          path="/admin/settings"
-          currentPath={currentPath}
-          key="admin-nav-settings"
-        />
-        <AdminNavItem
-          name={t`People`}
-          path="/admin/people"
-          currentPath={currentPath}
-          key="admin-nav-people"
-        />
-        <AdminNavItem
-          name={t`Data Model`}
-          path="/admin/datamodel"
-          currentPath={currentPath}
-          key="admin-nav-datamodel"
-        />
-        <AdminNavItem
-          name={t`Databases`}
-          path="/admin/databases"
-          currentPath={currentPath}
-          key="admin-nav-databases"
-        />
-        <AdminNavItem
-          name={t`Permissions`}
-          path="/admin/permissions"
-          currentPath={currentPath}
-          key="admin-nav-permissions"
-        />
-        {PLUGIN_ADMIN_NAV_ITEMS.map(({ name, path }) => (
-          <AdminNavItem
-            name={name}
-            path={path}
-            currentPath={currentPath}
-            key={`admin-nav-${name}`}
-          />
-        ))}
-        <AdminNavItem
-          name={t`Troubleshooting`}
-          path="/admin/troubleshooting"
-          currentPath={currentPath}
-          key="admin-nav-troubleshooting"
-        />
-      </AdminNavbarItems>
+      <MobileHide>
+        <AdminNavbarItems data-testid="admin-navbar-items">
+          {adminPaths.map(({ name, key, path }) => (
+            <AdminNavItem
+              name={name}
+              path={path}
+              key={key}
+              currentPath={currentPath}
+            />
+          ))}
+          {/* Security Center is rendered outside adminPaths because it
+              needs a live query to show an active-advisories badge */}
+          {PLUGIN_SECURITY_CENTER.isEnabled && (
+            <PLUGIN_SECURITY_CENTER.SecurityCenterNavItem
+              currentPath={currentPath}
+            />
+          )}
+        </AdminNavbarItems>
 
-      {!MetabaseSettings.isPaidPlan() && <StoreLink />}
-      <AdminExitLink
-        to="/"
-        data-metabase-event="Navbar;Exit Admin"
-      >{t`Exit admin`}</AdminExitLink>
+        {!isPaidPlan && isAdmin && <StoreLink />}
+      </MobileHide>
+      <AdminButtons>
+        <MobileNavbar adminPaths={adminPaths} currentPath={currentPath} />
+        <AppSwitcher />
+      </AdminButtons>
     </AdminNavbarRoot>
+  );
+};
+
+interface AdminMobileNavbarProps {
+  adminPaths: AdminPath[];
+  currentPath: string;
+}
+
+const MobileNavbar = ({ adminPaths, currentPath }: AdminMobileNavbarProps) => {
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
+
+  const ref = useClickOutside(() => setMobileNavOpen(false));
+
+  return (
+    <AdminMobileNavbar ref={ref}>
+      <Button
+        onClick={() => setMobileNavOpen((prev) => !prev)}
+        variant="subtle"
+        p="0.25rem"
+        leftSection={
+          <Icon
+            name="burger"
+            size={32}
+            className={AdminNavCS.MobileHamburgerIcon}
+          />
+        }
+      />
+
+      {mobileNavOpen && (
+        <AdminMobileNavBarItems aria-label={t`Navigation links`}>
+          {adminPaths.map(({ name, key, path }) => (
+            <AdminNavLink
+              to={path}
+              key={key}
+              isSelected={currentPath.startsWith(path)}
+              isInMobileNav
+            >
+              {name}
+            </AdminNavLink>
+          ))}
+          {/* Security Center is rendered outside adminPaths because it
+              needs a live query to show an active-advisories badge */}
+          {PLUGIN_SECURITY_CENTER.isEnabled && (
+            <PLUGIN_SECURITY_CENTER.SecurityCenterMobileNavItem
+              currentPath={currentPath}
+            />
+          )}
+        </AdminMobileNavBarItems>
+      )}
+    </AdminMobileNavbar>
   );
 };

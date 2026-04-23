@@ -1,13 +1,13 @@
-import { assoc, assocIn, chain } from "icepick";
+import dayjs from "dayjs";
+import { t } from "ttag";
 
-import { titleize, humanize } from "metabase/lib/formatting";
-import { startNewCard } from "metabase/lib/card";
-import { isPK } from "metabase/lib/types";
-import * as Urls from "metabase/lib/urls";
+import * as Urls from "metabase/utils/urls";
+import * as Lib from "metabase-lib";
+import Question from "metabase-lib/v1/Question";
 
 export const idsToObjectMap = (ids, objects) =>
   ids
-    .map(id => objects[id])
+    .map((id) => objects[id])
     .reduce((map, object) => ({ ...map, [object.id]: object }), {});
 // recursive freezing done by assoc here is too expensive
 // hangs browser for large databases
@@ -15,112 +15,85 @@ export const idsToObjectMap = (ids, objects) =>
 
 export const filterUntouchedFields = (fields, entity = {}) =>
   Object.keys(fields)
-    .filter(key => fields[key] !== undefined && entity[key] !== fields[key])
+    .filter((key) => fields[key] !== undefined && entity[key] !== fields[key])
     .reduce((map, key) => ({ ...map, [key]: fields[key] }), {});
 
-export const isEmptyObject = object => Object.keys(object).length === 0;
+export const isEmptyObject = (object) => Object.keys(object).length === 0;
 
-export const databaseToForeignKeys = database =>
-  database && database.tables_lookup
-    ? Object.values(database.tables_lookup)
-        // ignore tables without primary key
-        .filter(
-          table =>
-            table && table.fields.find(field => isPK(field.semantic_type)),
-        )
-        .map(table => ({
-          table: table,
-          field: table && table.fields.find(field => isPK(field.semantic_type)),
-        }))
-        .map(({ table, field }) => ({
-          id: field.id,
-          name:
-            table.schema_name && table.schema_name !== "public"
-              ? `${titleize(humanize(table.schema_name))}.${
-                  table.display_name
-                } → ${field.display_name}`
-              : `${table.display_name} → ${field.display_name}`,
-          description: field.description,
-        }))
-        .reduce((map, foreignKey) => assoc(map, foreignKey.id, foreignKey), {})
-    : {};
-
-export const fieldsToFormFields = fields =>
-  Object.keys(fields)
-    .map(key => [
-      `${key}.display_name`,
-      `${key}.semantic_type`,
-      `${key}.fk_target_field_id`,
-    ])
-    .reduce((array, keys) => array.concat(keys), []);
-
-// TODO Atte Keinänen 7/3/17: Construct question with Question of metabase-lib instead of this using function
 export const getQuestion = ({
-  dbId,
+  dbId: databaseId,
   tableId,
   fieldId,
-  metricId,
   segmentId,
   getCount,
   visualization,
   metadata,
 }) => {
-  const newQuestion = startNewCard("query", dbId, tableId);
+  const metadataProvider = Lib.metadataProvider(databaseId, metadata);
+  const table = Lib.tableOrCardMetadata(metadataProvider, tableId);
+  if (table == null) {
+    return;
+  }
 
-  // consider taking a look at Ramda as a possible underscore alternative?
-  // http://ramdajs.com/0.21.0/index.html
-  const question = chain(newQuestion)
-    .updateIn(["dataset_query", "query", "aggregation"], aggregation =>
-      getCount ? [["count"]] : aggregation,
-    )
-    .updateIn(["display"], display => visualization || display)
-    .updateIn(["dataset_query", "query", "breakout"], oldBreakout => {
-      if (fieldId && metadata && metadata.field(fieldId)) {
-        return [metadata.field(fieldId).getDefaultBreakout()];
-      }
-      if (fieldId) {
-        return [["field", fieldId, null]];
-      }
-      return oldBreakout;
-    })
-    .value();
+  let query = Lib.queryFromTableOrCardMetadata(metadataProvider, table);
+  if (getCount) {
+    query = Lib.aggregateByCount(query, -1);
+  }
 
-  if (metricId) {
-    return assocIn(
-      question,
-      ["dataset_query", "query", "aggregation"],
-      [["metric", metricId]],
-    );
+  if (fieldId) {
+    query = breakoutWithDefaultTemporalBucket(query, metadata, fieldId);
   }
 
   if (segmentId) {
-    return assocIn(
-      question,
-      ["dataset_query", "query", "filter"],
-      ["segment", segmentId],
-    );
+    query = filterBySegmentId(query, segmentId);
   }
 
-  return question;
+  let question = Question.create({ dataset_query: Lib.toJsQuery(query) });
+  if (visualization) {
+    question = question.setDisplay(visualization);
+  }
+
+  return question.card();
 };
 
-export const getQuestionUrl = getQuestionArgs =>
-  Urls.question(null, getQuestion(getQuestionArgs));
+function breakoutWithDefaultTemporalBucket(query, metadata, fieldId) {
+  const stageIndex = -1;
+  const field = metadata.field(fieldId);
 
-export const typeToLinkClass = {
-  dashboard: "text-green",
-  metric: "text-brand",
-  segment: "text-purple",
-  table: "text-purple",
-};
+  if (!field) {
+    return query;
+  }
 
-export const typeToBgClass = {
-  dashboard: "bg-green",
-  metric: "bg-brand",
-  segment: "bg-purple",
-  table: "bg-purple",
-};
+  const column = Lib.fromLegacyColumn(query, stageIndex, field);
+
+  if (!column) {
+    return query;
+  }
+
+  const newColumn = Lib.withDefaultBucket(query, stageIndex, column);
+  return Lib.replaceBreakouts(query, -1, newColumn);
+}
+
+function filterBySegmentId(query, segmentId) {
+  const stageIndex = -1;
+  const segmentMetadata = Lib.segmentMetadata(query, segmentId);
+
+  if (!segmentMetadata) {
+    return query;
+  }
+
+  return Lib.filter(query, stageIndex, segmentMetadata);
+}
+
+export const getQuestionUrl = (getQuestionArgs) =>
+  Urls.question(null, { hash: getQuestion(getQuestionArgs) });
 
 // little utility function to determine if we 'has' things, useful
 // for handling entity empty states
-export const has = entity => entity && entity.length > 0;
+export const has = (entity) => entity && entity.length > 0;
+
+export const getDescription = (question) => {
+  const timestamp = dayjs(question.getCreatedAt()).fromNow();
+  const author = question.getCreator().common_name;
+  return t`Created ${timestamp} by ${author}`;
+};

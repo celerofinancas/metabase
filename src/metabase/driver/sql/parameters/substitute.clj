@@ -1,46 +1,62 @@
 (ns metabase.driver.sql.parameters.substitute
-  (:require [clojure.string :as str]
-            [metabase.driver :as driver]
-            [metabase.driver.common.parameters :as i]
-            [metabase.driver.sql.parameters.substitution :as substitution]
-            [metabase.query-processor.error-type :as error-type]
-            [metabase.util.i18n :refer [tru]]))
+  (:refer-clojure :exclude [not-empty])
+  (:require
+   [clojure.string :as str]
+   [metabase.driver :as driver]
+   [metabase.driver-api.core :as driver-api]
+   ^{:clj-kondo/ignore [:deprecated-namespace]} [metabase.driver.common.parameters :as params]
+   ^{:clj-kondo/ignore [:deprecated-namespace]} [metabase.driver.common.parameters.parse :as params.parse]
+   [metabase.driver.sql.parameters.substitution :as sql.params.substitution]
+   [metabase.util :as u]
+   [metabase.util.i18n :refer [tru]]
+   [metabase.util.log :as log]
+   [metabase.util.performance :refer [not-empty]]))
 
-(defn- substitute-field-filter [[sql args missing] in-optional? k {:keys [field value], :as v}]
-  (if (and (= i/no-value value) in-optional?)
+(declare #^:private substitute*)
+
+(defn- substitute-field-param [[sql args missing] in-optional? k {:keys [_field value], :as v}]
+  (if (and (= params/no-value value) in-optional?)
     ;; no-value field filters inside optional clauses are ignored, and eventually emitted entirely
     [sql args (conj missing k)]
     ;; otherwise no values get replaced with `1 = 1` and other values get replaced normally
-    (let [{:keys [replacement-snippet prepared-statement-args]} (substitution/->replacement-snippet-info driver/*driver* v)]
+    (let [{:keys [replacement-snippet prepared-statement-args]}
+          (sql.params.substitution/->replacement-snippet-info driver/*driver* v)]
       [(str sql replacement-snippet) (concat args prepared-statement-args) missing])))
 
-(defn- substitute-card-query [[sql args missing] v]
-  (let [{:keys [replacement-snippet prepared-statement-args]} (substitution/->replacement-snippet-info driver/*driver* v)]
+(defn- substitute-simple-query [[sql args missing] v]
+  (let [{:keys [replacement-snippet prepared-statement-args]}
+        (sql.params.substitution/->replacement-snippet-info driver/*driver* v)]
     [(str sql replacement-snippet) (concat args prepared-statement-args) missing]))
 
-(defn- substitute-native-query-snippet [[sql args missing] v]
-   (let [{:keys [replacement-snippet]} (substitution/->replacement-snippet-info driver/*driver* v)]
-     [(str sql replacement-snippet) args missing]))
+(defn- substitute-native-query-snippet [param->value [sql args missing] in-optional? v]
+  (let [{:keys [replacement-snippet]} (sql.params.substitution/->replacement-snippet-info driver/*driver* v)
+        [processed-snippet snippet-args snippet-missing] (substitute* param->value (params.parse/parse replacement-snippet) in-optional?)]
+    [(str sql processed-snippet)
+     (not-empty (concat args snippet-args))
+     (not-empty (concat missing snippet-missing))]))
 
 (defn- substitute-param [param->value [sql args missing] in-optional? {:keys [k]}]
   (if-not (contains? param->value k)
     [sql args (conj missing k)]
     (let [v (get param->value k)]
       (cond
-        (i/FieldFilter? v)
-        (substitute-field-filter [sql args missing] in-optional? k v)
+        (or (params/FieldFilter? v)
+            (params/TemporalUnit? v))
+        (substitute-field-param [sql args missing] in-optional? k v)
 
-        (i/ReferencedCardQuery? v)
-        (substitute-card-query [sql args missing] v)
+        (or (params/ReferencedCardQuery? v)
+            (params/ReferencedTableQuery? v))
+        (substitute-simple-query [sql args missing] v)
 
-        (i/ReferencedQuerySnippet? v)
-        (substitute-native-query-snippet [sql args missing] v)
+        (params/ReferencedQuerySnippet? v)
+        (substitute-native-query-snippet param->value [sql args missing] in-optional? v)
 
-        (= i/no-value v)
+        (= params/no-value v)
         [sql args (conj missing k)]
 
         :else
-        (let [{:keys [replacement-snippet prepared-statement-args]} (substitution/->replacement-snippet-info driver/*driver* v)]
+        (let [{:keys [replacement-snippet prepared-statement-args]}
+              (sql.params.substitution/->replacement-snippet-info driver/*driver* v)]
           [(str sql replacement-snippet) (concat args prepared-statement-args) missing])))))
 
 (declare substitute*)
@@ -60,10 +76,10 @@
        (string? x)
        [(str sql x) args missing]
 
-       (i/Param? x)
+       (params/Param? x)
        (substitute-param param->value [sql args missing] in-optional? x)
 
-       (i/Optional? x)
+       (params/Optional? x)
        (substitute-optional param->value [sql args missing] x)))
    nil
    parsed))
@@ -77,16 +93,18 @@
                  {\"bird_type\" \"Steller's Jay\"})
     ;; -> [\"select * from foobars where bird_type = ?\" [\"Steller's Jay\"]]"
   [parsed-query param->value]
+  (log/tracef "Substituting params\n%s\nin query:\n%s" (u/pprint-to-str param->value) (u/pprint-to-str parsed-query))
   (let [[sql args missing] (try
                              (substitute* param->value parsed-query false)
                              (catch Throwable e
                                (throw (ex-info (tru "Unable to substitute parameters: {0}" (ex-message e))
-                                        {:type         (or (:type (ex-data e)) error-type/qp)
-                                         :params       param->value
-                                         :parsed-query parsed-query}
-                                        e))))]
+                                               {:type         (or (:type (ex-data e)) driver-api/qp.error-type.qp)
+                                                :params       param->value
+                                                :parsed-query parsed-query}
+                                               e))))]
+    (log/tracef "=>%s\n%s" sql (pr-str args))
     (when (seq missing)
       (throw (ex-info (tru "Cannot run the query: missing required parameters: {0}" (set missing))
-               {:type    error-type/missing-required-parameter
-                :missing missing})))
+                      {:type    driver-api/qp.error-type.missing-required-parameter
+                       :missing missing})))
     [(str/trim sql) args]))

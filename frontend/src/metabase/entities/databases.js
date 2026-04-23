@@ -1,31 +1,31 @@
+import { createSelector } from "@reduxjs/toolkit";
 import { normalize } from "normalizr";
 import _ from "underscore";
 
-import { createEntity } from "metabase/lib/entities";
-import * as Urls from "metabase/lib/urls";
-import { color } from "metabase/lib/colors";
-import { fetchData, createThunkAction } from "metabase/lib/redux";
-
-import { MetabaseApi } from "metabase/services";
+import {
+  databaseApi,
+  useGetDatabaseMetadataQuery,
+  useGetDatabaseQuery,
+  useListDatabasesQuery,
+} from "metabase/api";
 import { DatabaseSchema } from "metabase/schema";
-import Fields from "metabase/entities/fields";
-import Schemas from "metabase/entities/schemas";
-
-import { getMetadata, getFields } from "metabase/selectors/metadata";
-import { createSelector } from "reselect";
-
-import forms from "./databases/forms";
+import {
+  getMetadata,
+  getMetadataUnfiltered,
+} from "metabase/selectors/metadata";
+import { color } from "metabase/ui/colors";
+import { createEntity, entityCompatibleQuery } from "metabase/utils/entities";
+import { createThunkAction, fetchData } from "metabase/utils/redux";
+import { isVirtualCardId } from "metabase-lib/v1/metadata/utils/saved-questions";
 
 // OBJECT ACTIONS
 export const FETCH_DATABASE_METADATA =
   "metabase/entities/database/FETCH_DATABASE_METADATA";
 
-export const FETCH_DATABASE_SCHEMAS =
-  "metabase/entities/database/FETCH_DATABASE_SCHEMAS";
-export const FETCH_DATABASE_IDFIELDS =
-  "metabase/entities/database/FETCH_DATABASE_IDFIELDS";
-
-const Databases = createEntity({
+/**
+ * @deprecated use "metabase/api" instead
+ */
+export const Databases = createEntity({
   name: "databases",
   path: "/api/database",
   schema: DatabaseSchema,
@@ -33,61 +33,114 @@ const Databases = createEntity({
   nameOne: "database",
   nameMany: "databases",
 
+  rtk: {
+    getUseGetQuery: (fetchType) => {
+      if (fetchType === "fetchDatabaseMetadata") {
+        return {
+          useGetQuery: useGetDatabaseMetadataQuery,
+        };
+      }
+
+      return {
+        useGetQuery: useGetDatabaseQuery,
+      };
+    },
+    useListQuery: useListDatabasesQuery,
+  },
+
+  api: {
+    list: (entityQuery, dispatch) =>
+      entityCompatibleQuery(
+        entityQuery,
+        dispatch,
+        databaseApi.endpoints.listDatabases,
+      ),
+    get: (entityQuery, options, dispatch) =>
+      entityCompatibleQuery(
+        entityQuery,
+        dispatch,
+        databaseApi.endpoints.getDatabase,
+      ),
+    create: (entityQuery, dispatch) =>
+      entityCompatibleQuery(
+        entityQuery,
+        dispatch,
+        databaseApi.endpoints.createDatabase,
+      ),
+    update: (entityQuery, dispatch) =>
+      entityCompatibleQuery(
+        entityQuery,
+        dispatch,
+        databaseApi.endpoints.updateDatabase,
+      ),
+    delete: ({ id }, dispatch) =>
+      entityCompatibleQuery(id, dispatch, databaseApi.endpoints.deleteDatabase),
+    addSampleDatabase: (dispatch) =>
+      entityCompatibleQuery(
+        undefined,
+        dispatch,
+        databaseApi.endpoints.addSampleDatabase,
+      ),
+  },
+
   // ACTION CREATORS
   objectActions: {
     fetchDatabaseMetadata: createThunkAction(
       FETCH_DATABASE_METADATA,
-      ({ id }, { reload = false, params } = {}) => (dispatch, getState) =>
-        fetchData({
-          dispatch,
-          getState,
-          requestStatePath: ["metadata", "databases", id],
-          existingStatePath: ["metadata", "databases", id],
-          getData: async () => {
-            const databaseMetadata = await MetabaseApi.db_metadata({
-              dbId: id,
-              ...params,
-            });
-            return normalize(databaseMetadata, DatabaseSchema);
-          },
-          reload,
-        }),
+      ({ id }, { reload = false, params } = {}) =>
+        (dispatch, getState) =>
+          fetchData({
+            dispatch,
+            getState,
+            requestStatePath: ["metadata", "databases", id],
+            existingStatePath: ["metadata", "databases", id],
+            getData: async () => {
+              const databaseMetadata = await entityCompatibleQuery(
+                { id, ...params },
+                dispatch,
+                databaseApi.endpoints.getDatabaseMetadata,
+              );
+              return normalize(databaseMetadata, DatabaseSchema);
+            },
+            reload,
+          }),
     ),
-
-    fetchIdfields: createThunkAction(
-      FETCH_DATABASE_IDFIELDS,
-      ({ id }) => async () =>
-        normalize(await MetabaseApi.db_idfields({ dbId: id }), [Fields.schema]),
-    ),
-
-    fetchSchemas: ({ id }) => Schemas.actions.fetchList({ dbId: id }),
   },
 
   objectSelectors: {
-    getName: db => db && db.name,
-    getUrl: db => db && Urls.browseDatabase(db),
-    getIcon: db => ({ name: "database" }),
-    getColor: db => color("database"),
+    getName: (db) => db && db.name,
+    getColor: (db) => color("database"),
   },
 
   selectors: {
     getObject: (state, { entityId }) => getMetadata(state).database(entityId),
 
-    getHasSampleDatabase: state =>
-      _.any(Databases.selectors.getList(state), db => db.is_sample),
-    getIdfields: createSelector(
-      // we wrap getFields to handle a circular dep issue
-      [state => getFields(state), (state, props) => props.databaseId],
+    // these unfiltered selectors include hidden tables/fields for display in the admin panel
+    getObjectUnfiltered: (state, { entityId }) =>
+      getMetadataUnfiltered(state).database(entityId),
+
+    getListUnfiltered: (state, { entityQuery }) => {
+      const entityIds =
+        Databases.selectors.getEntityIds(state, { entityQuery }) ?? [];
+      return entityIds.map((entityId) =>
+        Databases.selectors.getObjectUnfiltered(state, { entityId }),
+      );
+    },
+
+    getHasSampleDatabase: (state, props) =>
+      _.any(Databases.selectors.getList(state, props), (db) => db.is_sample),
+
+    getIdFields: createSelector(
+      [
+        (state) => getMetadata(state).fieldsList(),
+        (state, props) => props.databaseId,
+      ],
       (fields, databaseId) =>
-        Object.values(fields).filter(f => {
-          const { db_id } = f.table || {}; // a field's table can be null
-          return db_id === databaseId && f.isPK();
+        fields.filter((field) => {
+          const dbId = field?.table?.db_id;
+          const isRealField = !isVirtualCardId(field.table_id);
+          return dbId === databaseId && isRealField && field.isPK();
         }),
     ),
   },
-
-  // FORM
-  forms,
 });
-
-export default Databases;

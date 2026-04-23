@@ -1,14 +1,14 @@
 (ns metabase.plugins.init-steps
   "Logic for performing the `init-steps` listed in a Metabase plugin's manifest. For driver plugins that specify that we
   should `lazy-load`, these steps are lazily performed the first time non-trivial driver methods (such as connecting
-  to a Database) are called; for all other Metabase plugins these are perfomed during launch.
+  to a Database) are called; for all other Metabase plugins these are performed during launch.
 
   The entire list of possible init steps is below, as impls for the `do-init-step!` multimethod."
-  (:require [clojure.tools.logging :as log]
-            [metabase.plugins.classloader :as classloader]
-            [metabase.plugins.jdbc-proxy :as jdbc-proxy]
-            [metabase.util :as u]
-            [metabase.util.i18n :refer [trs]]))
+  (:require
+   [metabase.classloader.core :as classloader]
+   [metabase.plugins.jdbc-proxy :as jdbc-proxy]
+   [metabase.util :as u]
+   [metabase.util.log :as log]))
 
 (defmulti ^:private do-init-step!
   "Perform a driver init step. Steps are listed in `init:` in the plugin manifest; impls for each step are found below
@@ -17,7 +17,7 @@
   (comp keyword :step))
 
 (defmethod do-init-step! :load-namespace [{nmspace :namespace}]
-  (log/debug (u/format-color 'blue (trs "Loading plugin namespace {0}..." nmspace)))
+  (log/debug (u/format-color 'blue "Loading plugin namespace %s..." nmspace))
   (classloader/require (symbol nmspace)))
 
 (defmethod do-init-step! :register-jdbc-driver [{class-name :class}]

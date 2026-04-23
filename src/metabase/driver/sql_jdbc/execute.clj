@@ -4,56 +4,132 @@
   `metabase.driver.sql-jdbc.execute.old-impl`, which will be removed in a future release; implementations of methods
   for JDBC drivers that do not support `java.time` classes can be found in
   `metabase.driver.sql-jdbc.execute.legacy-impl`. "
-  (:require [clojure.core.async :as a]
-            [clojure.string :as str]
-            [clojure.tools.logging :as log]
-            [java-time :as t]
-            [metabase.driver :as driver]
-            [metabase.driver.sql-jdbc.connection :as sql-jdbc.conn]
-            [metabase.driver.sql-jdbc.execute.diagnostic :as sql-jdbc.execute.diagnostic]
-            [metabase.driver.sql-jdbc.execute.old-impl :as execute.old]
-            [metabase.driver.sql-jdbc.sync.interface :as sql-jdbc.sync]
-            [metabase.mbql.util :as mbql.u]
-            [metabase.models.setting :refer [defsetting]]
-            [metabase.query-processor.context :as context]
-            [metabase.query-processor.error-type :as qp.error-type]
-            [metabase.query-processor.interface :as qp.i]
-            [metabase.query-processor.reducible :as qp.reducible]
-            [metabase.query-processor.store :as qp.store]
-            [metabase.query-processor.timezone :as qp.timezone]
-            [metabase.query-processor.util :as qputil]
-            [metabase.util :as u]
-            [metabase.util.i18n :refer [trs tru]]
-            [potemkin :as p])
-  (:import [java.sql Connection JDBCType PreparedStatement ResultSet ResultSetMetaData Statement Types]
-           [java.time Instant LocalDate LocalDateTime LocalTime OffsetDateTime OffsetTime ZonedDateTime]
-           javax.sql.DataSource))
+  (:refer-clojure :exclude [mapv empty? get-in])
+  #_{:clj-kondo/ignore [:metabase/modules]}
+  (:require
+   [clojure.core.async :as a]
+   [clojure.java.jdbc :as jdbc]
+   [clojure.string :as str]
+   [java-time.api :as t]
+   [medley.core :as m]
+   [metabase.driver :as driver]
+   [metabase.driver-api.core :as driver-api]
+   [metabase.driver.connection :as driver.conn]
+   [metabase.driver.settings :as driver.settings]
+   [metabase.driver.sql-jdbc.connection :as sql-jdbc.conn]
+   [metabase.driver.sql-jdbc.execute.diagnostic :as sql-jdbc.execute.diagnostic]
+   [metabase.driver.sql-jdbc.execute.old-impl :as sql-jdbc.execute.old]
+   [metabase.driver.sql-jdbc.sync.interface :as sql-jdbc.sync.interface]
+   [metabase.lib.schema.info :as lib.schema.info]
+   [metabase.premium-features.core :refer [defenterprise]]
+   [metabase.tracing.core :as tracing]
+   [metabase.util :as u]
+   [metabase.util.i18n :refer [tru]]
+   [metabase.util.log :as log]
+   [metabase.util.malli :as mu]
+   [metabase.util.performance :as perf :refer [mapv empty? get-in]]
+   [potemkin :as p])
+  (:import
+   (java.sql
+    Connection
+    JDBCType
+    PreparedStatement
+    ResultSet
+    ResultSetMetaData
+    SQLFeatureNotSupportedException
+    Statement
+    Types)
+   (java.time
+    Instant
+    LocalDate
+    LocalDateTime
+    LocalTime
+    OffsetDateTime
+    OffsetTime
+    ZonedDateTime)
+   (java.util.concurrent Executors)
+   (javax.sql DataSource)))
+
+(set! *warn-on-reflection* true)
 
 ;;; +----------------------------------------------------------------------------------------------------------------+
 ;;; |                                        SQL JDBC Reducible QP Interface                                         |
 ;;; +----------------------------------------------------------------------------------------------------------------+
 
-(defmulti connection-with-timezone
-  "Fetch a Connection for a `database` with session time zone set to `timezone-id` (if supported by the driver.) The
-  default implementation:
+(def ConnectionOptions
+  "Malli schema for the options passed to [[do-with-connection-with-options]]."
+  [:maybe
+   [:map
+    ;; a string like 'US/Pacific' or something like that.
+    [:session-timezone {:optional true} [:maybe [:ref driver-api/schema.expression.temporal.timezone-id]]]
+    ;; whether this Connection should NOT be read-only, e.g. for DDL stuff or inserting data or whatever.
+    [:write? {:optional true} [:maybe :boolean]]
+    [:download? {:optional true} [:maybe :boolean]]
+    ;; true if called from table-rows-sample-query
+    [:sample? {:optional true} [:maybe :boolean]]
+    ;; don't autoclose the connection
+    [:keep-open? {:optional true} [:maybe :boolean]]]])
 
-  1. Calls util fn `datasource` to get a c3p0 connection pool DataSource
-  2. Calls `.getConnection()` the normal way
-  3. Executes `set-timezone-sql` if implemented by the driver.
+(defmulti do-with-connection-with-options
+  "Fetch a [[java.sql.Connection]] from a `driver`/`db-or-id-or-spec`, and invoke
 
-  `timezone-id` will be `nil` if a `report-timezone` Setting is not currently set; don't change the session time zone
-  if this is the case.
+    (f connection)
 
-  For drivers that support session timezones, the default implementation and `set-timezone-sql` should be considered
-  deprecated in favor of implementing `connection-with-timezone` directly. This way you can set the session timezone
-  in the most efficient manner, e.g. only setting it if needed (if there's an easy way for you to check this), or by
-  setting it as a parameter of the connection itself (the default connection pools are automatically flushed when
-  `report-timezone-id` changes).
+  If `db-or-id-or-spec` is a Database or Database ID, the default implementation fetches a pooled connection spec for
+  that Database using [[datasource]].
 
-  Custom implementations should set transaction isolation to the least-locking level supported by the driver, and make
-  connections read-only (*after* setting timezone, if needed)."
-  {:added    "0.35.0"
-   :arglists '(^java.sql.Connection [driver database ^String timezone-id])}
+  If `db-or-id-or-spec` is a `clojure.java.jdbc` spec, it fetches a Connection
+  using [[clojure.java..jdbc/get-connection]]. Note that this will not be a pooled connection unless your spec is for
+  a pooled DataSource.
+
+  `options` matches the [[ConnectionOptions]] schema above.
+
+  * If `:session-timezone` is passed, it should be used to set the Session timezone for the Connection. If not passed,
+    leave as-is
+
+  * If `:write?` is NOT passed or otherwise falsey, make the connection read-only if possible; if it is truthy, make
+    the connection read-write. Note that this current does not run things inside a transaction automatically; you'll
+    have to do that yourself if you want it
+
+  * If `:keep-open?` is passed, the connection will NOT be closed after `(f connection)`. The caller is responsible for
+    closing it.
+
+  The normal 'happy path' is more or less
+
+    (with-open [conn (.getConnection (datasource driver db-or-id-or-spec))]
+      (set-best-transaction-level! driver conn)
+      (set-time-zone-if-supported! driver conn session-timezone)
+      (.setReadOnly conn true)
+      (.setAutoCommit conn true) ; so the query(s) are not ran inside a transaction
+      (.setHoldability conn ResultSet/CLOSE_CURSORS_AT_COMMIT)
+      (f conn))
+
+  This default implementation is abstracted out into two functions, [[do-with-resolved-connection]]
+  and [[set-default-connection-options!]], that you can use as needed in custom implementations. See various driver
+  implementations for examples. You should only set connection options on top-level calls
+  to [[do-with-connection-with-options]]; check whether this is a [[recursive-connection?]] before setting options.
+
+  There are two usual ways to set the session timezone if your driver supports them:
+
+  1. Specifying the session timezone based on the value of [[metabase.driver/report-timezone]] as a JDBC connection
+     parameter in the JDBC connection spec returned by [[metabase.driver.sql-jdbc.connection/connection-details->spec]].
+     If the spec returned by this method changes, connection pools associated with it will be flushed automatically.
+     This is the preferred way to set session timezones; if you set them this way, you DO NOT need to implement this
+     method unless you need to do something special with regards to setting the transaction level.
+
+  2. Setting the session timezone manually on the [[java.sql.Connection]] returned by [[datasource]] based on the
+     value of `session-timezone`.
+
+    2a. The default implementation will do this for you by executing SQL if you implement
+        [[set-timezone-sql]].
+
+    2b. You can implement this method, [[do-with-connection-with-options]], yourself and set the timezone however you
+        wish. Only set it if `session-timezone` is not `nil`!
+
+   Custom implementations should set transaction isolation to the least-locking level supported by the driver, and make
+   connections read-only (*after* setting timezone, if needed)."
+  {:added    "0.47.0"
+   :arglists '([driver db-or-id-or-spec options f])}
   driver/dispatch-on-initialized-driver
   :hierarchy #'driver/hierarchy)
 
@@ -61,29 +137,26 @@
   "Set the `PreparedStatement` parameter at index `i` to `object`. Dispatches on driver and class of `object`. By
   default, this calls `.setObject`, but drivers can override this method to convert the object to a different class or
   set it with a different intended JDBC type as needed."
-  {:arglists '([driver prepared-statement i object])}
+  {:added "0.34.0" :arglists '([driver prepared-statement i object])}
   (fn [driver _ _ object]
     [(driver/dispatch-on-initialized-driver driver) (class object)])
   :hierarchy #'driver/hierarchy)
+
+;; TODO -- maybe like [[do-with-connection-with-options]] we should replace [[prepared-statement]] and [[statement]]
+;; with `do-with-prepared-statement` and `do-with-statement` methods -- that way you can't accidentally forget to wrap
+;; things in a `try-catch` and call `.close` (metabase#40010)
 
 (defmulti ^PreparedStatement prepared-statement
   "Create a PreparedStatement with `sql` query, and set any `params`. You shouldn't need to override the default
   implementation for this method; if you do, take care to set options to maximize result set read performance (e.g.
   `ResultSet/TYPE_FORWARD_ONLY`); refer to the default implementation."
-  {:added "0.35.0", :arglists '(^java.sql.PreparedStatement [driver ^java.sql.Connection connection ^String sql params])}
-  driver/dispatch-on-initialized-driver
-  :hierarchy #'driver/hierarchy)
-
-(defmulti ^Statement statement-supported?
-  "Indicates whether the given driver supports creating a java.sql.Statement, via the Connection. By default, this is
-  true for all :sql-jdbc drivers.  If the underlying driver does not support Statement creation, override this as
-  false."
-  {:added "0.39.0", :arglists '([driver])}
+  {:added "0.35.0",
+   :arglists '(^java.sql.PreparedStatement [driver ^java.sql.Connection connection ^String sql params])}
   driver/dispatch-on-initialized-driver
   :hierarchy #'driver/hierarchy)
 
 (defmulti ^Statement statement
-  "Create a Statement object using the given connection. Only called if statement-supported? above returns true. This
+  "Create a Statement object using the given connection. Only called if the `:jdbc/statements` feature is supported. This
   is to be used to execute native queries, which implies there are no parameters. As with prepared-statement, you
   shouldn't need to override the default implementation for this method; if you do, take care to set options to maximize
   result set read performance (e.g. `ResultSet/TYPE_FORWARD_ONLY`); refer to the default implementation."
@@ -106,6 +179,12 @@
   driver/dispatch-on-initialized-driver
   :hierarchy #'driver/hierarchy)
 
+(defmulti db-type-name
+  "Return the type name of a column given the rsmeta and the column-index. The default implementation fetches this information from rsmeta."
+  {:added "0.59.0" :arglists '([driver ^java.sql.ResultSetMetaData rsmeta column-index])}
+  driver/dispatch-on-initialized-driver
+  :hierarchy #'driver/hierarchy)
+
 (defmulti column-metadata
   "Return a sequence of maps containing information about the corresponding columns in query results. The default
   implementation fetches this information via the result set metadata. It is unlikely you will need to override this."
@@ -120,8 +199,8 @@
     ;; default method for Postgres not covered by any [driver jdbc-type] methods
     (defmethod read-column-thunk :postgres
       ...)"
-  {:added "0.35.0", :arglists '([driver rs rsmeta i])}
-  (fn [driver _ ^ResultSetMetaData rsmeta ^long col-idx]
+  {:added "0.35.0", :arglists '([driver ^java.sql.ResultSet rs ^java.sql.ResultSetMetaData rsmeta i])}
+  (fn [driver _rs ^ResultSetMetaData rsmeta ^Long col-idx]
     [(driver/dispatch-on-initialized-driver driver) (.getColumnType rsmeta col-idx)])
   :hierarchy #'driver/hierarchy)
 
@@ -130,41 +209,46 @@
 ;;; +----------------------------------------------------------------------------------------------------------------+
 
 (defn datasource
-  "Fetch the connection pool `DataSource` associated with `database`."
+  "Fetch the connection pool `DataSource` associated with `db-or-id-or-spec`."
   {:added "0.35.0"}
-  ^DataSource [database]
-  (:datasource (sql-jdbc.conn/db->pooled-connection-spec database)))
+  ^DataSource [db-or-id-or-spec]
+  (:datasource (sql-jdbc.conn/db->pooled-connection-spec db-or-id-or-spec)))
 
 (defn datasource-with-diagnostic-info!
   "Fetch the connection pool `DataSource` associated with `database`, while also recording diagnostic info for the
   pool. To be used in conjunction with `sql-jdbc.execute.diagnostic/capturing-diagnostic-info`."
   {:added "0.40.0"}
-  ^DataSource [driver database]
-  (let [ds (datasource database)]
-    (sql-jdbc.execute.diagnostic/record-diagnostic-info-for-pool driver (u/the-id database) ds)
+  ^DataSource [driver db-or-id]
+  (let [ds (datasource db-or-id)]
+    (sql-jdbc.execute.diagnostic/record-diagnostic-info-for-pool! driver (u/the-id db-or-id) ds)
     ds))
 
 (defn set-time-zone-if-supported!
   "Execute `set-timezone-sql`, if implemented by driver, to set the session time zone. This way of setting the time zone
-  should be considered deprecated in favor of implementing `connection-with-time-zone` directly."
+  should be considered deprecated in favor of implementing `connection-with-timezone` directly."
   {:deprecated "0.35.0"}
   [driver ^Connection conn ^String timezone-id]
   (when timezone-id
-    (when-let [format-string (execute.old/set-timezone-sql driver)]
+    (when-let [format-string (sql-jdbc.execute.old/set-timezone-sql driver)]
       (try
         (let [sql (format format-string (str \' timezone-id \'))]
-          (log/debug (trs "Setting {0} database timezone with statement: {1}" driver (pr-str sql)))
+          (log/debugf "Setting %s database timezone with statement: %s" driver (pr-str sql))
           (try
             (.setReadOnly conn false)
             (catch Throwable e
-              (log/debug e (trs "Error setting connection to readwrite"))))
+              (log/debug e "Error setting connection to readwrite")))
           (with-open [stmt (.createStatement conn)]
             (.execute stmt sql)
             (log/tracef "Successfully set timezone for %s database to %s" driver timezone-id)))
         (catch Throwable e
-          (log/error e (trs "Failed to set timezone ''{0}'' for {1} database" timezone-id driver)))))))
+          (log/errorf e "Failed to set timezone '%s' for %s database" timezone-id driver))))))
 
-;; TODO - since we're not running the queries in a transaction, does this make any difference at all?
+(defenterprise set-role-if-supported!
+  "OSS no-op implementation of `set-role-if-supported!`."
+  metabase-enterprise.impersonation.driver
+  [_ _ _])
+
+;; TODO - since we're not running the queries in a transaction, does this make any difference at all? (metabase#40012)
 (defn set-best-transaction-level!
   "Set the connection transaction isolation level to the least-locking level supported by the DB. See
   https://docs.oracle.com/cd/E19830-01/819-4721/beamv/index.html for an explanation of these levels."
@@ -172,8 +256,8 @@
   [driver ^Connection conn]
   (let [dbmeta (.getMetaData conn)]
     (loop [[[level-name ^Integer level] & more] [[:read-uncommitted Connection/TRANSACTION_READ_UNCOMMITTED]
-                                                 [:repeatable-read  Connection/TRANSACTION_REPEATABLE_READ]
-                                                 [:read-committed   Connection/TRANSACTION_READ_COMMITTED]]]
+                                                 [:read-committed   Connection/TRANSACTION_READ_COMMITTED]
+                                                 [:repeatable-read  Connection/TRANSACTION_REPEATABLE_READ]]]
       (cond
         (.supportsTransactionIsolationLevel dbmeta level)
         (do
@@ -181,39 +265,184 @@
           (try
             (.setTransactionIsolation conn level)
             (catch Throwable e
-              (log/debug e (trs "Error setting transaction isolation level for {0} database to {1}" (name driver) level-name)))))
+              (log/debugf e "Error setting transaction isolation level for %s database to %s" (name driver) level-name))))
 
         (seq more)
         (recur more)))))
 
-(defmethod connection-with-timezone :sql-jdbc
-  [driver database ^String timezone-id]
-  (let [conn (.getConnection (datasource-with-diagnostic-info! driver database))]
+(def ^:private DbOrIdOrSpec
+  [:and
+   [:or :int :map]
+   [:fn
+    ;; can't wrap a java.sql.Connection here because we're not
+    ;; responsible for its lifecycle and that means you can't use
+    ;; `with-open` on the Connection you'd get from the DataSource
+    {:error/message "Cannot be a JDBC spec wrapping a java.sql.Connection"}
+    (complement :connection)]])
+
+(mu/defn do-with-resolved-connection-data-source :- (driver-api/instance-of-class DataSource)
+  "Part of the default implementation for [[do-with-connection-with-options]]: get an appropriate `java.sql.DataSource`
+  for `db-or-id-or-spec`. Not for use with a JDBC spec wrapping a `java.sql.Connection` (a spec with the key
+  `:connection`), since we do not have control over its lifecycle and would thus not be able to use [[with-open]] with
+  Connections provided by this DataSource."
+  {:added "0.47.0", :arglists '(^javax.sql.DataSource [driver db-or-id-or-spec options])}
+  [driver           :- :keyword
+   db-or-id-or-spec :- DbOrIdOrSpec
+   {:keys [^String session-timezone], :as _options} :- ConnectionOptions]
+  (if-not (u/id db-or-id-or-spec)
+    ;; not a Database or Database ID... this is a raw `clojure.java.jdbc` spec, use that
+    ;; directly.
+    (reify DataSource
+      (getConnection [_this]
+        #_{:clj-kondo/ignore [:discouraged-var]}
+        (jdbc/get-connection db-or-id-or-spec)))
+    ;; otherwise this is either a Database or Database ID.
+    (if-let [old-method-impl (get-method
+                              #_{:clj-kondo/ignore [:deprecated-var]} sql-jdbc.execute.old/connection-with-timezone
+                              driver)]
+      ;; use the deprecated impl for `connection-with-timezone` if one exists.
+      (do
+        (log/warnf "%s is deprecated in Metabase 0.47.0. Implement %s instead."
+                   #_{:clj-kondo/ignore [:deprecated-var]}
+                   'connection-with-timezone
+                   'do-with-connection-with-options)
+        ;; for compatibility, make sure we pass it an actual Database instance.
+        (let [database (if (integer? db-or-id-or-spec)
+                         (driver-api/with-metadata-provider db-or-id-or-spec
+                           (driver-api/database (driver-api/metadata-provider)))
+                         db-or-id-or-spec)]
+          (reify DataSource
+            (getConnection [_this]
+              (old-method-impl driver database session-timezone)))))
+      (datasource-with-diagnostic-info! driver db-or-id-or-spec))))
+
+(def ^:private ^:dynamic ^{:added "0.47.0"} *connection-recursion-depth*
+  "In recursive calls to [[do-with-connection-with-options]] we don't want to set options AGAIN, because this might
+  break things. For example in a top-level `:write?` call, we might disable auto-commit and run things in a
+  transaction; a read-only call inside of this transaction block should not go in and change the connection to be
+  auto-commit. So only set options at the top-level call, and use this to keep track of whether we're at the top level
+  or not.
+
+  This gets incremented inside [[do-with-resolved-connection]], so the top level call with have a depth of `0`, a
+  nested call will get `1`, and so forth. This is done this way and inside [[do-with-resolved-connection]]
+  and [[set-default-connection-options!]] so drivers that implement "
+  -1)
+
+(defn recursive-connection?
+  "Whether or not we are in a recursive call to [[do-with-connection-with-options]]. If we are, you shouldn't set
+  Connection options AGAIN, as that may override previous options that we don't want to override."
+  {:added "0.47.0"}
+  []
+  (pos? *connection-recursion-depth*))
+
+(mu/defn do-with-resolved-connection
+  "Execute
+
+    (f ^java.sql.Connection conn)
+
+  with a resolved JDBC connection. Part of the default implementation for [[do-with-connection-with-options]].
+  Generally does not set any `options`, but may set session-timezone if `driver` implements the
+  deprecated [[sql-jdbc.execute.old/connection-with-timezone]] method."
+  {:added "0.47.0"}
+  [driver           :- :keyword
+   db-or-id-or-spec :- [:or :int :map]
+   options          :- ConnectionOptions
+   f                :- fn?]
+  (binding [*connection-recursion-depth* (inc *connection-recursion-depth*)]
+    (if-let [conn (:connection db-or-id-or-spec)]
+      (f conn)
+      (let [get-conn (^:once fn* [] (.getConnection (do-with-resolved-connection-data-source driver db-or-id-or-spec options)))]
+        (if (:keep-open? options)
+          (f (get-conn))
+          (with-open [conn ^Connection (get-conn)]
+            (f conn)))))))
+
+(defonce ^:private network-timeout-executor
+  (delay (Executors/newCachedThreadPool)))
+
+(mu/defn set-default-connection-options!
+  "Part of the default implementation of [[do-with-connection-with-options]]: set options for a newly fetched
+  Connection."
+  {:added "0.47.0"}
+  [driver                                                 :- :keyword
+   db-or-id-or-spec
+   ^Connection conn                                       :- (driver-api/instance-of-class Connection)
+   {:keys [^String session-timezone write?], :as options} :- ConnectionOptions]
+  (when-let [db (cond
+                  ;; id?
+                  (integer? db-or-id-or-spec)
+                  (driver-api/with-metadata-provider db-or-id-or-spec
+                    (driver-api/database (driver-api/metadata-provider)))
+                  ;; db?
+                  (u/id db-or-id-or-spec)     db-or-id-or-spec
+                  ;; otherwise it's a spec and we can't get the db
+                  :else nil)]
+    (set-role-if-supported! driver conn db))
+  (when-not (recursive-connection?)
+    (log/tracef "Setting default connection options with options %s" (pr-str options))
+    (set-best-transaction-level! driver conn)
+    (set-time-zone-if-supported! driver conn session-timezone)
+    (let [read-only? (not (or write?
+                              ;; we need to set autoCommit to false which causes postgresql
+                              ;; to enforce readOnly which will break queries that rely on
+                              ;; ddl statements, etc (#61892)
+                              (and (-> options :download?) (= driver :postgres))))]
+      (try
+        ;; Setting the connection to read-only does not prevent writes on some databases, and is meant
+        ;; to be a hint to the driver to enable database optimizations
+        ;; See https://docs.oracle.com/javase/8/docs/api/java/sql/Connection.html#setReadOnly-boolean-
+        (log/trace (pr-str (list '.setReadOnly 'conn read-only?)))
+        (.setReadOnly conn read-only?)
+        (catch Throwable e
+          (log/debugf e "Error setting connection readOnly to %s" (pr-str read-only?)))))
+    ;; If this is (supposedly) a read-only connection, we would prefer enable auto-commit
+    ;; so this IS NOT ran inside of a transaction, but without transaction the read-only
+    ;; flag has no effect for most of the drivers.
+    ;;
+    ;; TODO -- for `write?` connections, we should probably disable autoCommit and then manually call `.commit` at after
+    ;; `f`... we need to check and make sure that won't mess anything up, since some existing code is already doing it
+    ;; manually. (metabase#40014)
+    (cond (not (or write?
+                   (and (-> options :download?) (= driver :postgres))))
+          (try
+            (log/trace (pr-str '(.setAutoCommit conn true)))
+            (.setAutoCommit conn true)
+            (catch Throwable e
+              (log/debug e "Error enabling connection autoCommit")))
+
+          ;; todo (dan 7/11/25): fixing straightforward postgres oom on downloads in #60733, but seems like write? is
+          ;; not set here. Note this is explicitly silent when `write?`. Lots of tests fail with autocommit false
+          ;; there.
+          (and (or (-> options :download?) (-> options :sample?)) (isa? driver/hierarchy driver :postgres))
+          (try
+            (log/trace (pr-str '(.setAutoCommit conn false)))
+            (.setAutoCommit conn false)
+            (catch Throwable e
+              (log/debug e "Error setting connection autoCommit to false"))))
     (try
-      (set-best-transaction-level! driver conn)
-      (set-time-zone-if-supported! driver conn timezone-id)
-      (try
-        (.setReadOnly conn true)
-        (catch Throwable e
-          (log/debug e (trs "Error setting connection to read-only"))))
-      (try
-        ;; set autocommit to false so that pg honors fetchSize. Otherwise it commits the transaction and needs the
-        ;; entire realized result set
-        (.setAutoCommit conn false)
-        (catch Throwable e
-          (log/debug e (trs "Error setting connection to autoCommit false"))))
-      (try
-        (.setHoldability conn ResultSet/CLOSE_CURSORS_AT_COMMIT)
-        (catch Throwable e
-          (log/debug e (trs "Error setting default holdability for connection"))))
-      conn
+      ;; setNetworkTimeout sets Socket.setSoTimeout() which releases from blocked socker reads.
+      ;; This is necessary because .close() doesn't interrupt threads stuck in native socket reads
+      (.setNetworkTimeout conn @network-timeout-executor driver.settings/*network-timeout-ms*)
       (catch Throwable e
-        (.close conn)
-        (throw e)))))
+        (log/debug e "Error setting network timeout for connection")))
+    (try
+      (log/trace (pr-str '(.setHoldability conn ResultSet/CLOSE_CURSORS_AT_COMMIT)))
+      (.setHoldability conn ResultSet/CLOSE_CURSORS_AT_COMMIT)
+      (catch Throwable e
+        (log/debug e "Error setting default holdability for connection")))))
+
+(defmethod do-with-connection-with-options :sql-jdbc
+  [driver db-or-id-or-spec options f]
+  (do-with-resolved-connection
+   driver
+   db-or-id-or-spec
+   options
+   (fn [^Connection conn]
+     (set-default-connection-options! driver db-or-id-or-spec conn options)
+     (f conn))))
 
 ;; TODO - would a more general method to convert a parameter to the desired class (and maybe JDBC type) be more
 ;; useful? Then we can actually do things like log what transformations are taking place
-
 
 (defn- set-object
   ([^PreparedStatement prepared-statement, ^Integer index, object]
@@ -267,19 +496,20 @@
   "Set parameters for the prepared statement by calling `set-parameter` for each parameter."
   {:added "0.35.0"}
   [driver stmt params]
+  (when (< (try (.. ^PreparedStatement stmt getParameterMetaData getParameterCount)
+                (catch Throwable _ (count params)))
+           (count params))
+    (throw (ex-info (tru "It looks like we got more parameters than we can handle, remember that parameters cannot be used in comments or as identifiers.")
+                    {:driver driver
+                     :type   driver-api/qp.error-type.driver
+                     :statement (str/split-lines (str stmt))
+                     :params params})))
   (dorun
    (map-indexed
     (fn [i param]
       (log/tracef "Set param %d -> %s" (inc i) (pr-str param))
       (set-parameter driver stmt (inc i) param))
     params)))
-
-(defsetting ^:private sql-jdbc-fetch-size
-  "Fetch size for result sets. We want to ensure that the jdbc ResultSet objects are not realizing the entire results
-  in memory."
-  :default 500
-  :type :integer
-  :visibility :internal)
 
 (defmethod prepared-statement :sql-jdbc
   [driver ^Connection conn ^String sql params]
@@ -292,22 +522,17 @@
       (try
         (.setFetchDirection stmt ResultSet/FETCH_FORWARD)
         (catch Throwable e
-          (log/debug e (trs "Error setting prepared statement fetch direction to FETCH_FORWARD"))))
+          (log/debug e "Error setting prepared statement fetch direction to FETCH_FORWARD")))
       (try
         (when (zero? (.getFetchSize stmt))
-          (.setFetchSize stmt (sql-jdbc-fetch-size)))
+          (.setFetchSize stmt (driver.settings/sql-jdbc-fetch-size)))
         (catch Throwable e
-          (log/debug e (trs "Error setting prepared statement fetch size to fetch-size"))))
+          (log/debug e "Error setting prepared statement fetch size to fetch-size")))
       (set-parameters! driver stmt params)
       stmt
       (catch Throwable e
         (.close stmt)
         (throw e)))))
-
-;; by default, drivers support .createStatement
-(defmethod statement-supported? :sql-jdbc
-  [_]
-  true)
 
 (defmethod statement :sql-jdbc
   [_ ^Connection conn]
@@ -319,42 +544,51 @@
       (try
         (.setFetchDirection stmt ResultSet/FETCH_FORWARD)
         (catch Throwable e
-          (log/debug e (trs "Error setting statement fetch direction to FETCH_FORWARD"))))
+          (log/debug e "Error setting statement fetch direction to FETCH_FORWARD")))
       (try
         (when (zero? (.getFetchSize stmt))
-          (.setFetchSize stmt (sql-jdbc-fetch-size)))
+          (.setFetchSize stmt (driver.settings/sql-jdbc-fetch-size)))
         (catch Throwable e
-          (log/debug e (trs "Error setting statement fetch size to fetch-size"))))
+          (log/debug e "Error setting statement fetch size to fetch-size")))
       stmt
       (catch Throwable e
         (.close stmt)
         (throw e)))))
 
+(defn- wire-up-canceled-chan-to-cancel-Statement!
+  "If `canceled-chan` gets a message, cancel the Statement `stmt`."
+  [^Statement stmt canceled-chan]
+  (when canceled-chan
+    (a/go
+      (when (a/<! canceled-chan)
+        (when-not (.isClosed stmt)
+          (log/debug "Query canceled, calling Statement.cancel()")
+          (.cancel stmt))))))
+
 (defn- prepared-statement*
   ^PreparedStatement [driver conn sql params canceled-chan]
-  ;; if canceled-chan gets a message, cancel the PreparedStatement
-  (let [^PreparedStatement stmt (prepared-statement driver conn sql params)]
-    (a/go
-      (when (a/<! canceled-chan)
-        (log/debug (trs "Query canceled, calling PreparedStatement.cancel()"))
-        (u/ignore-exceptions
-          (.cancel stmt))))
-    stmt))
+  ;; sometimes preparing the statement fails, usually if the SQL syntax is invalid.
+  (doto (try
+          (prepared-statement driver conn sql params)
+          (catch Throwable e
+            (throw (ex-info (tru "Error preparing statement: {0}" (ex-message e))
+                            {:driver driver
+                             :type   driver-api/qp.error-type.driver
+                             :sql    (str/split-lines (driver/prettify-native-form driver sql))
+                             :params params}
+                            e))))
+    (wire-up-canceled-chan-to-cancel-Statement! canceled-chan)))
 
 (defn- use-statement? [driver params]
-  (and (statement-supported? driver) (empty? params)))
+  (and (driver/database-supports? driver :jdbc/statements nil) (empty? params)))
 
 (defn- statement* ^Statement [driver conn canceled-chan]
-  ;; if canceled-chan gets a message, cancel the Statement
-  (let [^Statement stmt (statement driver conn)]
-    (a/go
-      (when (a/<! canceled-chan)
-        (log/debug (trs "Query canceled, calling Statement.cancel()"))
-        (u/ignore-exceptions
-         (.cancel stmt))))
-    stmt))
+  (doto (statement driver conn)
+    (wire-up-canceled-chan-to-cancel-Statement! canceled-chan)))
 
-(defn- statement-or-prepared-statement ^Statement [driver conn sql params canceled-chan]
+(defn statement-or-prepared-statement
+  "Create a statement or a prepared statement. Should be called from [[with-open]]."
+  ^Statement [driver conn sql params canceled-chan]
   (if (use-statement? driver params)
     (statement* driver conn canceled-chan)
     (prepared-statement* driver conn sql params canceled-chan)))
@@ -371,7 +605,8 @@
                     {:sql sql :driver driver}))))
 
 (defn- execute-statement-or-prepared-statement! ^ResultSet [driver ^Statement stmt max-rows params sql]
-  (let [st (doto stmt (.setMaxRows max-rows))]
+  (let [max-rows (or max-rows 0) ; 0 means no limit
+        st (doto stmt (.setMaxRows max-rows))]
     (if (use-statement? driver params)
       (execute-statement! driver st sql)
       (execute-prepared-statement! driver st))))
@@ -393,6 +628,18 @@
   [_ rs _ i]
   (get-object-of-class-thunk rs i java.time.LocalDateTime))
 
+(defn- arrays->vectors
+  [obj]
+  (if (some-> obj class .isArray)
+    (mapv arrays->vectors obj)
+    obj))
+
+(defmethod read-column-thunk [:sql-jdbc Types/ARRAY]
+  [_driver ^java.sql.ResultSet rs _rsmeta ^Integer i]
+  (fn []
+    (when-let [sql-arr (.getObject rs i)]
+      (arrays->vectors (.getArray ^java.sql.Array sql-arr)))))
+
 (defmethod read-column-thunk [:sql-jdbc Types/TIMESTAMP_WITH_TIMEZONE]
   [_ rs _ i]
   (get-object-of-class-thunk rs i java.time.OffsetDateTime))
@@ -409,7 +656,9 @@
   [_ rs _ i]
   (get-object-of-class-thunk rs i java.time.OffsetTime))
 
-(defn- column-range [^ResultSetMetaData rsmeta]
+(defn column-range
+  "Return a sequence of all the column indexes in a JDBC result set. Column indexes in JDBC start at `1`."
+  [^ResultSetMetaData rsmeta]
   (range 1 (inc (.getColumnCount rsmeta))))
 
 (defn- log-readers [driver ^ResultSetMetaData rsmeta fns]
@@ -429,92 +678,322 @@
                 (or (:name (meta f))
                     f)))))))
 
-(defn- old-read-column-thunk
-  "Implementation of deprecated method `old/read-column` if a non-default one is available."
-  [driver rs ^ResultSetMetaData rsmeta ^Integer i]
-  (let [col-type (.getColumnType rsmeta i)
-        method   (get-method execute.old/read-column [driver col-type])
-        default? (some (fn [dispatch-val]
-                         (= method (get-method execute.old/read-column dispatch-val)))
-                       [:default
-                        [::driver/driver col-type]
-                        [:sql-jdbc col-type]])]
-    (when-not default?
-      ^{:name (format "old-impl/read-column %s %d" driver i)}
-      (fn []
-        (method driver nil rs rsmeta i)))))
-
 (defn row-thunk
   "Returns a thunk that can be called repeatedly to get the next row in the result set, using appropriate methods to
   fetch each value in the row. Returns `nil` when the result set has no more rows."
   [driver ^ResultSet rs ^ResultSetMetaData rsmeta]
-  (let [fns (for [i (column-range rsmeta)]
-              (or (old-read-column-thunk driver rs rsmeta i)
-                  (read-column-thunk driver rs rsmeta (long i))))]
+  (let [fns (mapv #(read-column-thunk driver rs rsmeta (long %))
+                  (column-range rsmeta))]
     (log-readers driver rsmeta fns)
-    (let [thunk (apply juxt fns)]
+    (let [thunk (if (seq fns)
+                  (perf/juxt* fns)
+                  (constantly []))]
       (fn row-thunk* []
         (when (.next rs)
           (thunk))))))
 
+(defn- resolve-missing-base-types
+  "Resolve missing base types in initial column `metadatas` using [[driver/dynamic-database-types-lookup]]."
+  [driver metadatas]
+  (if (driver-api/initialized?)
+    (let [missing (keep (fn [{:keys [database_type base_type]}]
+                          (when-not base_type
+                            database_type))
+                        metadatas)
+          lookup (driver/dynamic-database-types-lookup
+                  driver (driver-api/database (driver-api/metadata-provider)) missing)]
+      (if (seq lookup)
+        (mapv (fn [{:keys [database_type base_type] :as metadata}]
+                (if-not base_type
+                  (m/assoc-some metadata :base_type (lookup database_type))
+                  metadata))
+              metadatas)
+        metadatas))
+    metadatas))
+
+(defmethod db-type-name :sql-jdbc
+  [_driver ^ResultSetMetaData rsmeta column-index]
+  (.getColumnTypeName rsmeta column-index))
+
 (defmethod column-metadata :sql-jdbc
   [driver ^ResultSetMetaData rsmeta]
-  (mapv
-   (fn [^Integer i]
-     (let [col-name     (.getColumnLabel rsmeta i)
-           db-type-name (.getColumnTypeName rsmeta i)
-           base-type    (sql-jdbc.sync/database-type->base-type driver (keyword db-type-name))]
-       (log/tracef "Column %d '%s' is a %s which is mapped to base type %s for driver %s\n"
-                   i col-name db-type-name base-type driver)
-       {:name      col-name
-        ;; TODO - disabled for now since it breaks a lot of tests. We can re-enable it when the tests are in a better
-        ;; state
-        #_:original_name #_(.getColumnName rsmeta i)
-        #_:jdbc_type #_ (u/ignore-exceptions
-                          (.getName (JDBCType/valueOf (.getColumnType rsmeta i))))
-        #_:db_type   #_db-type-name
-        :base_type   (or base-type :type/*)}))
-   (column-range rsmeta)))
+  (->> (mapv
+        (fn [^Long i]
+          (let [col-name     (.getColumnLabel rsmeta i)
+                db-type-name (db-type-name driver rsmeta i)
+                base-type    (sql-jdbc.sync.interface/database-type->base-type driver (keyword db-type-name))]
+            (log/tracef "Column %d '%s' is a %s which is mapped to base type %s for driver %s\n"
+                        i col-name db-type-name base-type driver)
+            {:name      col-name
+             ;; TODO - disabled for now since it breaks a lot of tests. We can re-enable it when the tests are in a better
+             ;; state
+             #_:original_name #_(.getColumnName rsmeta i)
+             #_:jdbc_type #_(u/ignore-exceptions
+                              (.getName (JDBCType/valueOf (.getColumnType rsmeta i))))
+             :base_type     base-type
+             :database_type db-type-name}))
+        (column-range rsmeta))
+       (resolve-missing-base-types driver)
+       (mapv #(u/assoc-default % :base_type :type/*))))
 
 (defn reducible-rows
   "Returns an object that can be reduced to fetch the rows and columns in a `ResultSet` in a driver-specific way (e.g.
-  by using `read-column-thunk` to fetch values)."
+  by using `read-column-thunk` to fetch values).
+
+  The three-arity was added in 0.48.0"
   {:added "0.35.0"}
-  [driver ^ResultSet rs ^ResultSetMetaData rsmeta canceled-chan]
-  (let [row-thunk (row-thunk driver rs rsmeta)]
-    (qp.reducible/reducible-rows row-thunk canceled-chan)))
+  ([driver ^ResultSet rs ^ResultSetMetaData rsmeta]
+   (let [row-thunk (row-thunk driver rs rsmeta)]
+     (driver-api/reducible-rows row-thunk)))
+
+  ([driver ^ResultSet rs ^ResultSetMetaData rsmeta canceled-chan]
+   (let [row-thunk (row-thunk driver rs rsmeta)]
+     (driver-api/reducible-rows row-thunk canceled-chan))))
+
+(defmulti inject-remark
+  "Injects the remark into the SQL query text."
+  {:added "0.48.0", :arglists '([driver sql remark])}
+  driver/dispatch-on-initialized-driver
+  :hierarchy #'driver/hierarchy)
+
+;  Combines the original SQL query with query remarks. Most databases using sql-jdbc based drivers support prepending the
+;  remark to the SQL statement, so we have it as a default. However, some drivers do not support it, so we allow it to
+;  be overridden.
+(defmethod inject-remark :default
+  [_ sql remark]
+  (str "-- " remark "\n" sql))
+
+(mu/defn- download? :- :boolean
+  [context :- [:maybe ::lib.schema.info/context]]
+  (let [download-contexts #{:csv-download :xlsx-download :json-download
+                            :public-csv-download :public-xlsx-download :public-json-download
+                            :embedded-csv-download :embedded-xlsx-download :embedded-json-download
+                            :pulse}]
+    (boolean (download-contexts context))))
 
 (defn execute-reducible-query
-  "Default impl of `execute-reducible-query` for sql-jdbc drivers."
-  {:added "0.35.0", :arglists '([driver query context respond] [driver sql params max-rows context respond])}
-  ([driver {{sql :query, params :params} :native, :as outer-query} context respond]
-   {:pre [(string? sql) (seq sql)]}
-   (let [remark   (qputil/query->remark driver outer-query)
-         sql      (str "-- " remark "\n" sql)
-         max-rows (or (mbql.u/query->max-rows-limit outer-query)
-                      qp.i/absolute-max-results)]
-     (execute-reducible-query driver sql params max-rows context respond)))
+  "Default impl of [[metabase.driver/execute-reducible-query]] for sql-jdbc drivers."
+  {:added "0.35.0", :arglists '([driver query context respond])}
+  [driver {{sql :query, params :params} :native, :as outer-query} _context respond]
+  {:pre [(string? sql) (seq sql)]}
+  (tracing/with-span :db-user "db-user.execute-query" {:db/engine (name driver)}
+    (let [database (driver-api/database (driver-api/metadata-provider))
+          sql      (if (get-in (driver.conn/effective-details database) [:include-user-id-and-hash] true)
+                     (->> (driver-api/query->remark driver outer-query)
+                          (inject-remark driver sql))
+                     sql)
+          max-rows (driver-api/determine-query-max-rows outer-query)]
+      (do-with-connection-with-options
+       driver
+       (driver-api/database (driver-api/metadata-provider))
+       {:session-timezone (driver-api/report-timezone-id-if-supported driver (driver-api/database (driver-api/metadata-provider)))
+        :download? (download? (-> outer-query :info :context))
+        :sample?   (= :table-rows-sample (-> outer-query :info :context))}
+       (fn [^Connection conn]
+         (with-open [stmt          (statement-or-prepared-statement driver conn sql params (driver-api/canceled-chan))
+                     ^ResultSet rs (try
+                                     (execute-statement-or-prepared-statement! driver stmt max-rows params sql)
+                                     (catch Throwable e
+                                       (throw (ex-info (tru "Error executing query: {0}" (ex-message e))
+                                                       (cond-> {:driver driver
+                                                                :sql    (str/split-lines (driver/prettify-native-form driver sql))
+                                                                :params params
+                                                                :type   driver-api/qp.error-type.invalid-query}
+                                                         (driver/query-canceled? driver e)
+                                                         (assoc :query/query-canceled? true))
+                                                       e))))]
+           (let [rsmeta           (.getMetaData rs)
+                 results-metadata {:cols (column-metadata driver rsmeta)}]
+             (try (respond results-metadata (reducible-rows driver rs rsmeta (driver-api/canceled-chan)))
+                ;; Following cancels the statement on the dbms side.
+                ;; It avoids blocking `.close` call, in case we reduced the results subset eg. by means of
+                ;; [[metabase.query-processor.middleware.limit/limit-xform]] middleware, while statement is still
+                ;; in progress. This problem was encountered on Redshift. For details see the issue #39018.
+                ;; It also handles situation where query is canceled through [[driver-api/canceled-chan]] (#41448).
+                  (finally
+                  ;; TODO: Following `when` is in place just to find out if vertica is flaking because of cancelations.
+                  ;;       It should be removed afterwards!
+                    (when-not (= :vertica driver)
+                      (try (when-not (.isClosed stmt)
+                             (.cancel stmt))
+                           (catch SQLFeatureNotSupportedException _
+                             (log/warnf "Statemet's `.cancel` method is not supported by the `%s` driver."
+                                        (name driver)))
+                           (catch Throwable e
+                             (log/info e "Statement cancelation failed.")))))))))))))
 
-  ([driver sql params max-rows context respond]
-   (with-open [conn          (connection-with-timezone driver (qp.store/database) (qp.timezone/report-timezone-id-if-supported))
-               stmt          (statement-or-prepared-statement driver conn sql params (context/canceled-chan context))
-               ^ResultSet rs (try
-                               (execute-statement-or-prepared-statement! driver stmt max-rows params sql)
-                               (catch Throwable e
-                                 (throw (ex-info (tru "Error executing query: {0}" (ex-message e))
-                                                 {:sql sql, :params params, :type qp.error-type/invalid-query}
-                                                 e))))]
-     (let [rsmeta           (.getMetaData rs)
-           results-metadata {:cols (column-metadata driver rsmeta)}]
-       (respond results-metadata (reducible-rows driver rs rsmeta (context/canceled-chan context)))))))
+(defn reducible-query
+  "Returns a reducible collection of rows as maps from `db` and a given SQL query. This is similar to [[jdbc/reducible-query]] but reuses the
+  driver-specific configuration for the Connection and Statement/PreparedStatement. This is slightly different from [[execute-reducible-query]]
+  in that it is not intended to be used as part of middleware. Keywordizes column names. "
+  {:added "0.49.0", :arglists '([db [sql & params]])}
+  [db [sql & params]]
+  (let [driver (:engine db)]
+    (reify clojure.lang.IReduceInit
+      (reduce [_ rf init]
+        (do-with-connection-with-options
+         driver
+         db
+         nil
+         (fn [^Connection conn]
+           (with-open [stmt          (statement-or-prepared-statement driver conn sql params nil)
+                       ^ResultSet rs (try
+                                       (let [max-rows 0] ; 0 means no limit
+                                         (execute-statement-or-prepared-statement! driver stmt max-rows params sql))
+                                       (catch Throwable e
+                                         (throw (ex-info (tru "Error executing query: {0}" (ex-message e))
+                                                         {:driver driver
+                                                          :sql    (str/split-lines (driver/prettify-native-form driver sql))
+                                                          :params params}
+                                                         e))))]
+             ;; TODO - we should probably be using [[reducible-rows]] instead to convert to the correct types
+             (reduce rf init (jdbc/reducible-result-set rs {})))))))))
 
+;;; +----------------------------------------------------------------------------------------------------------------+
+;;; |                                                 Actions Stuff                                                  |
+;;; +----------------------------------------------------------------------------------------------------------------+
+
+(mu/defmethod driver/execute-write-query! :sql-jdbc
+  [driver                                 :- :keyword
+   {{sql :query, :keys [params]} :native} :- [:map
+                                              [:type   [:= :native]]
+                                              [:native [:map
+                                                        [:query :string]]]]]
+  {:pre [(string? sql)]}
+  (try
+    (do-with-connection-with-options
+     driver
+     (driver-api/database (driver-api/metadata-provider))
+     {:write? true
+      :session-timezone (driver-api/report-timezone-id-if-supported driver (driver-api/database (driver-api/metadata-provider)))}
+     (fn [^Connection conn]
+       (with-open [stmt (statement-or-prepared-statement driver conn sql params nil)]
+         {:rows-affected (if (instance? PreparedStatement stmt)
+                           (.executeUpdate ^PreparedStatement stmt)
+                           (.executeUpdate stmt sql))})))
+    (catch Throwable e
+      (throw (ex-info (tru "Error executing write query: {0}" (ex-message e))
+                      {:sql sql, :params params, :type driver-api/qp.error-type.invalid-query}
+                      e)))))
+
+;;; +----------------------------------------------------------------------------------------------------------------+
+;;; |                                               Transform Stuff                                                  |
+;;; +----------------------------------------------------------------------------------------------------------------+
+
+(defn- create-and-execute-statement!
+  [driver conn sql params]
+  (with-open [stmt (statement-or-prepared-statement driver conn sql params (driver-api/canceled-chan))]
+    {:rows-affected (if (instance? PreparedStatement stmt)
+                      (.executeUpdate ^PreparedStatement stmt)
+                      (.executeUpdate stmt sql))}))
+
+(defmethod driver/execute-raw-queries! :sql-jdbc
+  [driver conn-spec queries]
+  (try
+    (do-with-connection-with-options
+     driver
+     conn-spec
+     {:write? true}
+     (fn [^Connection conn]
+       (.setAutoCommit conn false)
+       (try
+         (let [result (doall (for [[sql params] queries]
+                               (create-and-execute-statement! driver conn sql params)))]
+           (.commit conn)
+           result)
+         (catch Throwable t
+           (.rollback conn)
+           (throw t)))))
+    (catch Throwable e
+      (throw (ex-info (tru "Error executing raw queries: {0}" (ex-message e))
+                      {:queries queries, :type driver-api/qp.error-type.invalid-query}
+                      e)))))
 
 ;;; +----------------------------------------------------------------------------------------------------------------+
 ;;; |                                       Convenience Imports from Old Impl                                        |
 ;;; +----------------------------------------------------------------------------------------------------------------+
 
+#_{:clj-kondo/ignore [:deprecated-var]}
 (p/import-vars
- [execute.old
-  ;; interface (set-parameter is imported as well at the top of the namespace)
-  set-timezone-sql
-  read-column])
+ [sql-jdbc.execute.old
+  connection-with-timezone
+  set-timezone-sql])
+
+(def ^:private ^:dynamic
+  ^{:doc "Dynamic context for resilient connection management. Contains a map with:
+          - :db - the database instance, used to create new connections
+          - :conn - the current resilient connection (if any)
+          Used to enable connection recovery and reuse within [[driver/do-with-resilient-connection]]"}
+  *resilient-connection-ctx*
+  nil)
+
+(defmethod driver/do-with-resilient-connection :sql-jdbc
+  [driver db f]
+  (binding [*resilient-connection-ctx* {:db db}]
+    (try
+      (f driver db)
+      (finally
+        (when-let [conn ^Connection (:conn *resilient-connection-ctx*)]
+          (try (.close conn)
+               (catch Throwable _)))))))
+
+(defn is-conn-open?
+  "Checks if the conn is open.
+   If `:check-valid?` is passed, ensures the connection is actually usable. If it isn't, closes it"
+  [^Connection conn & {:keys [check-valid?]}]
+  (let [is-open (not (.isClosed conn))]
+    (if (and is-open check-valid?)
+      (try
+        (if (.isValid conn 5)
+          is-open
+          ;; if the connection is not valid anymore but hasn't been closed by the driver,
+          ;; we close it so that [[sql-jdbc.execute/try-ensure-open-conn!]] can attempt to reopen it.
+          ;; we've observed the snowflake driver hit this case
+          (do (.close conn) false))
+        (catch Throwable _ is-open))
+      is-open)))
+
+(defn try-ensure-open-conn!
+  "Ensure that a connection is open and usable, reconnecting if necessary and possible.
+
+  If the given connection is already open, just returns it. If the connection
+  is closed and we're in [[driver/do-with-resilient-connection]] context,
+  attempts to reuse an existing reconnection or establish a new one.
+  The connection will automatically be closed when exiting the [[driver/do-with-resilient-connection]]
+  context.
+
+  The `:force-context-local?` option forces creation of a new context-local
+  connection even if the outer connection is still open.
+
+  ConnectionOptions can be passed as `opts`, but `:keep-open?` will always be
+  overridden to `true`.
+
+  Not thread-safe."
+
+  ^Connection [driver ^Connection connection & {:keys [force-context-local?] :as opts}]
+  (cond
+    (and (not force-context-local?) (is-conn-open? connection))
+    connection
+
+    (not (thread-bound? #'*resilient-connection-ctx*))
+    (do
+      (log/warn "Requesting a resilient connection, but we're not in a resilient context")
+      connection)
+
+    (some-> *resilient-connection-ctx* :conn is-conn-open?)
+    (:conn *resilient-connection-ctx*)
+
+    :else
+    ;; we locally reset `*connection-recursion-depth*` so that the new connection
+    ;; gets all the options set as we'd expect, else we may be obtaining a badly
+    ;; configured connection (see: https://github.com/metabase/metabase/pull/59999)
+    (binding [*connection-recursion-depth* -1]
+      (try
+        (log/info "Obtaining a fresh resilient connection")
+        (let [{:keys [db]} *resilient-connection-ctx*
+              conn (do-with-connection-with-options driver db (merge opts {:keep-open? true}) identity)]
+          (set! *resilient-connection-ctx* {:db db :conn conn})
+          conn)
+        (catch Throwable e
+          (log/warn e "Failed obtaining a new resilient connection")
+          connection)))))

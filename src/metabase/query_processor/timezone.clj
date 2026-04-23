@@ -1,12 +1,20 @@
 (ns metabase.query-processor.timezone
   "Functions for fetching the timezone for the current query."
-  (:require [clojure.tools.logging :as log]
-            [java-time :as t]
-            [metabase.config :as config]
-            [metabase.driver :as driver]
-            [metabase.query-processor.store :as qp.store]
-            [metabase.util.i18n :refer [tru]])
-  (:import java.time.ZonedDateTime))
+  (:require
+   [java-time.api :as t]
+   [metabase.config.core :as config]
+   [metabase.driver :as driver]
+   [metabase.driver.util :as driver.u]
+   [metabase.lib.metadata :as lib.metadata]
+   [metabase.lib.schema.metadata :as lib.schema.metadata]
+   ^{:clj-kondo/ignore [:deprecated-namespace]} [metabase.query-processor.store :as qp.store]
+   [metabase.util.log :as log]
+   [metabase.util.malli :as mu]
+   ^{:clj-kondo/ignore [:discouraged-namespace]} [metabase.util.malli.schema :as ms])
+  (:import
+   (java.time ZonedDateTime)))
+
+(set! *warn-on-reflection* true)
 
 (def ^:private ^:dynamic *report-timezone-id-override* nil)
 
@@ -22,27 +30,34 @@
       (t/zone-id timezone-id)
       timezone-id
       (catch Throwable _
-        (log/warn (tru "Invalid timezone ID ''{0}''" timezone-id))
+        (log/warnf "Invalid timezone ID '%s'" timezone-id)
         nil))))
 
 (defn- report-timezone-id* []
   (or *report-timezone-id-override*
       (driver/report-timezone)))
 
-
 ;;; +----------------------------------------------------------------------------------------------------------------+
 ;;; |                                                Public Interface                                                |
 ;;; +----------------------------------------------------------------------------------------------------------------+
 
-(defn report-timezone-id-if-supported
-  "Timezone ID for the report timezone, if the current driver supports it. (If the current driver supports it, this is
+(mu/defn report-timezone-id-if-supported
+  "Timezone ID for the report timezone, if the current driver and database supports it. (If the current driver supports it, this is
   bound by the `bind-effective-timezone` middleware.)"
   (^String []
-   (report-timezone-id-if-supported driver/*driver*))
+   (report-timezone-id-if-supported driver/*driver* (lib.metadata/database (qp.store/metadata-provider))))
 
-  (^String [driver]
-   (when (driver/supports? driver :set-timezone)
-     (valid-timezone-id (report-timezone-id*)))))
+  (^String [driver   :- :keyword
+            database :- [:or
+                         ::lib.schema.metadata/database
+                         (ms/InstanceOf :model/Database)
+                         [:= ::db-from-store]]]
+   (when-let [database (if (= database ::db-from-store)
+                         (when (qp.store/initialized?)
+                           (lib.metadata/database (qp.store/metadata-provider)))
+                         database)]
+     (when (driver.u/supports? driver :set-timezone database)
+       (valid-timezone-id (report-timezone-id*))))))
 
 (defn database-timezone-id
   "The timezone that the current database is in, as determined by the most recent sync."
@@ -52,7 +67,11 @@
   (^String [database]
    (valid-timezone-id
     (or *database-timezone-id-override*
-        (:timezone (if (= database ::db-from-store) (qp.store/database) database))))))
+        (let [database (if (= database ::db-from-store)
+                         (when (qp.store/initialized?)
+                           (lib.metadata/database (qp.store/metadata-provider)))
+                         database)]
+          (:timezone database))))))
 
 (defn system-timezone-id
   "The system timezone of this Metabase instance."
@@ -69,7 +88,7 @@
 (defn results-timezone-id
   "The timezone that a query is actually ran in ­ report timezone, if set and supported by the current driver;
   otherwise the timezone of the database (if known), otherwise the system timezone. Guaranteed to always return a
-  timezone ID ­ never returns `nil`."
+  timezone ID,­ never returns `nil`."
   (^String []
    (results-timezone-id driver/*driver* ::db-from-store))
 
@@ -82,7 +101,7 @@
     (or *results-timezone-id-override*
         (if use-report-timezone-id-if-unsupported?
           (valid-timezone-id (report-timezone-id*))
-          (report-timezone-id-if-supported driver))
+          (report-timezone-id-if-supported driver database))
         ;; don't actually fetch DB from store unless needed — that way if `*results-timezone-id-override*` is set we
         ;; don't need to init a store during tests
         (database-timezone-id database)

@@ -1,14 +1,15 @@
-import styled from "styled-components";
-import { color } from "metabase/lib/colors";
+// eslint-disable-next-line no-restricted-imports
+import styled from "@emotion/styled";
+
 import { breakpointMinSmall } from "metabase/styled-components/theme";
 
 export const StepRoot = styled.section`
   position: relative;
   padding: 2rem;
   margin-bottom: 1.75rem;
-  border: 1px solid ${color("border")};
+  border: 1px solid var(--mb-color-border);
   border-radius: 0.5rem;
-  background-color: ${color("white")};
+  background-color: var(--mb-color-background-primary);
 
   ${breakpointMinSmall} {
     padding: 4rem;
@@ -16,7 +17,7 @@ export const StepRoot = styled.section`
 `;
 
 export const StepTitle = styled.div`
-  color: ${color("brand")};
+  color: var(--mb-color-brand);
   font-size: 1.3125rem;
   font-weight: 700;
   margin-bottom: 0.5rem;
@@ -32,18 +33,13 @@ export const StepLabel = styled.div`
   align-items: center;
   width: 2.625rem;
   height: 2.625rem;
-  border: 1px solid ${color("border")};
+  border: 1px solid var(--mb-color-border);
   border-radius: 50%;
-  background-color: ${color("white")};
+  background-color: var(--mb-color-background-primary);
 `;
 
 export const StepLabelText = styled.span`
-  color: ${color("brand")};
+  color: var(--mb-color-brand);
   font-weight: 700;
   line-height: 1;
-`;
-
-export const StepDescription = styled.div`
-  color: ${color("text-medium")};
-  margin: 0.875rem 0;
 `;

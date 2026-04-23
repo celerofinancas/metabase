@@ -1,3 +1,4 @@
+// eslint-disable-next-line import/no-default-export -- deprecated usage
 export default function testAcrossTimezones(runTests) {
   // run_timezone_tests sets "TZ" environment variable to change the timezone
   const clientTz = process.env["TZ"] || "[default]";
@@ -7,7 +8,7 @@ export default function testAcrossTimezones(runTests) {
   );
 
   describe(`client timezone ${clientTz}`, () => {
-    reportTzs.map(reportTz => {
+    reportTzs.map((reportTz) => {
       describe(`report timezone ${reportTz}`, () => {
         runTests(reportTz);
       });

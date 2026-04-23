@@ -8,11 +8,6 @@
 (def ^:private hierarchy
   (make-hierarchy))
 
-(defn known-error-types
-  "Set of all known QP error types."
-  []
-  (descendants hierarchy :error))
-
 (defn known-error-type?
   "Is `error-type` a known QP error type (i.e., one defined with `deferror` above)?"
   [error-type]
@@ -50,6 +45,11 @@
   "The current user does not have required permissions to run the current query."
   :parent client)
 
+(defn permission-error?
+  "Is `error-type` a permissions error"
+  [error-type]
+  (= missing-required-permissions error-type))
+
 (deferror bad-configuration
   "Something related to configuration (e.g. of a sandbox/GTAP) is preventing us from being able to run the query."
   :parent client)
@@ -63,6 +63,16 @@
   :parent invalid-query
   :show-in-embeds? true)
 
+(deferror multiple-conflicting-parameter-values
+  "The query is parameterized, and multiple filters provided conflicting values."
+  :parent invalid-query
+  :show-in-embeds? true)
+
+(deferror multiple-conflicting-default-values
+  "The query is parameterized, no value was supplied, and multiple filters have conflicting default values."
+  :parent invalid-query
+  :show-in-embeds? true)
+
 (deferror invalid-parameter
   "The query is parameterized, and a supplied parameter has an invalid value."
   :parent invalid-query
@@ -73,16 +83,37 @@
   :parent invalid-query
   :show-in-embeds? true)
 
+(deferror disabled-feature
+  "The query is using a feature that is disabled globally."
+  :parent invalid-query
+  :show-in-embeds? true)
+
+(deferror missing-measure
+  "The query references a measure that does not exist or belongs to a different database."
+  :parent invalid-query
+  :show-in-embeds? true)
+
+(deferror invalid-measure
+  "The query references a measure that has an invalid definition (e.g., no aggregation, contains metric references,
+  has cycles, etc.)."
+  :parent invalid-query
+  :show-in-embeds? true)
+
+(deferror dangling-lhs-ref-in-join-condition
+  "The query contains a join condition which refers to a field on the LHS of the join which is no longer available."
+  :parent invalid-query
+  :show-in-embeds? true)
+
+(deferror circular-reference
+  "The query has circular referencing sub-queries."
+  :parent invalid-query
+  :show-in-embeds? true)
+
 ;;;; ### Server-Side Errors
 
 (deferror server
   "Generic ancestor type for all *unexpected* server-side errors. Equivalent of a HTTP 5xx status code."
   :parent :error)
-
-(defn server-error?
-  "Is `error-type` a server error type, the equivalent of an HTTP 5xx status code?"
-  [error-type]
-  (isa? hierarchy error-type :server))
 
 (deferror timed-out
   "Error type if query fails to return the first row of results after some timeout."

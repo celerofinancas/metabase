@@ -1,42 +1,106 @@
 (ns metabase-enterprise.sso.integrations.sso-utils
   "Functions shared by the various SSO implementations"
-  (:require [clojure.tools.logging :as log]
-            [metabase-enterprise.sso.integrations.sso-settings :as sso-settings]
-            [metabase.email.messages :as email]
-            [metabase.models.user :refer [User]]
-            [metabase.util :as u]
-            [metabase.util.i18n :refer [trs]]
-            [metabase.util.schema :as su]
-            [schema.core :as s]
-            [toucan.db :as db])
-  (:import java.util.UUID))
+  (:require
+   [clojure.string :as str]
+   [metabase-enterprise.sso.settings :as ee-sso-settings]
+   [metabase.api.common :as api]
+   [metabase.appearance.core :as appearance]
+   [metabase.sso.settings :as sso-settings]
+   [metabase.system.core :as system]
+   [metabase.util :as u]
+   [metabase.util.i18n :refer [trs tru]]
+   [metabase.util.log :as log])
+  (:import
+   (java.net URI URISyntaxException)))
 
-(def ^:private UserAttributes
-  {:first_name       su/NonBlankString
-   :last_name        su/NonBlankString
-   :email            su/Email
-   ;; TODO - we should avoid hardcoding this to make it easier to add new integrations. Maybe look at something like
-   ;; the keys of `(methods sso/sso-get)`
-   :sso_source       (s/enum "saml" "jwt")
-   :login_attributes (s/maybe {s/Any s/Any})})
+(set! *warn-on-reflection* true)
 
-(s/defn create-new-sso-user!
-  "This function is basically the same thing as the `create-new-google-auth-user` from `metabase.models.user`. We need
-  to refactor the `core_user` table structure and the function used to populate it so that the enterprise product can
-  reuse it"
-  [user :- UserAttributes]
-  (u/prog1 (db/insert! User (merge user {:password (str (UUID/randomUUID))}))
-    (log/info (trs "New SSO user created: {0} ({1})" (:common_name <>) (:email <>)))
-    ;; send an email to everyone including the site admin if that's set
-    (when (sso-settings/send-new-sso-user-admin-email?)
-      (email/send-user-joined-admin-notification-email! <>, :google-auth? true))))
+(defn maybe-throw-user-provisioning
+  "Throw an error if `user-provisioning-enabled?` is falsey, indicating new user creation is not allowed."
+  [user-provisioning-type]
+  (when (not user-provisioning-type)
+    (throw (ex-info (trs "Sorry, but you''ll need a {0} account to view this page. Please contact your administrator."
+                         (u/slugify (appearance/site-name))) {:status-code 401}))))
 
-(defn fetch-and-update-login-attributes!
-  "Update the login attributes for the user at `email`. This call is a no-op if the login attributes are the same"
-  [email new-user-attributes]
-  (when-let [{:keys [id login_attributes] :as user} (db/select-one User :%lower.email (u/lower-case-en email))]
-    (if (= login_attributes new-user-attributes)
-      user
-      (do
-        (db/update! User id :login_attributes new-user-attributes)
-        (User id)))))
+(defmulti check-user-provisioning
+  "If `user-provisioning-enabled?` is false, then we should throw an error when attempting to create a new user."
+  {:arglists '([model])}
+  keyword)
+
+(defmethod check-user-provisioning :saml
+  [_]
+  (maybe-throw-user-provisioning (ee-sso-settings/saml-user-provisioning-enabled?)))
+
+(defmethod check-user-provisioning :ldap
+  [_]
+  (maybe-throw-user-provisioning (ee-sso-settings/ldap-user-provisioning-enabled?)))
+
+(defmethod check-user-provisioning :jwt
+  [_]
+  (maybe-throw-user-provisioning (ee-sso-settings/jwt-user-provisioning-enabled?)))
+
+(defmethod check-user-provisioning :slack-connect
+  [_]
+  (maybe-throw-user-provisioning (sso-settings/slack-connect-user-provisioning-enabled)))
+
+(defmethod check-user-provisioning :oidc
+  [_]
+  (maybe-throw-user-provisioning (ee-sso-settings/oidc-user-provisioning-enabled?)))
+
+(defn relative-uri?
+  "Checks that given `uri` is not an absolute (so no scheme and no host)."
+  [uri]
+  (let [^URI uri (if (string? uri)
+                   (try
+                     (URI. uri)
+                     (catch URISyntaxException _
+                       nil))
+                   uri)]
+    (or (nil? uri)
+        (and (nil? (.getHost uri))
+             (nil? (.getScheme uri))))))
+
+(defn check-sso-redirect
+  "Check if open redirect is being exploited in SSO. If so, or if the redirect-url is invalid, throw a 400."
+  [redirect-url]
+  (try
+    (let [redirect (some-> redirect-url (URI.))
+          our-host (some-> (system/site-url) (URI.) (.getHost))]
+      (api/check-400 (or (nil? redirect-url)
+                         (relative-uri? redirect)
+                         (= (.getHost redirect) our-host)))
+      redirect-url)
+    (catch Exception e
+      (log/error e "Invalid redirect URL")
+      (throw (ex-info (tru "Invalid redirect URL")
+                      {:status-code  400
+                       :redirect-url redirect-url})))))
+
+(defn group-names->ids
+  "Translate a user's group names to a set of Metabase group IDs using the given group mappings."
+  [group-names group-mappings]
+  (->> (cond-> group-names (string? group-names) vector)
+       (map keyword)
+       (mapcat group-mappings)
+       set))
+
+(defn all-mapped-group-ids
+  "Returns the set of all Metabase group IDs that have configured mappings."
+  [group-mappings]
+  (-> group-mappings vals flatten set))
+
+(defn stringify-valid-attributes
+  "Remove all invalid attributes from passed user attributes, make sure all the remaining keys and values are strings"
+  [attrs]
+  (->> attrs
+       (keep (fn [[key value]]
+               (cond
+                 (or (vector? value) (map? value) (nil? value))
+                 (log/warnf "Dropping attribute '%s' with non-stringable value: %s" (name key) value)
+
+                 (str/starts-with? (name key) "@")
+                 (log/warnf "Dropping attribute '%s', keys beginning with `@` are reserved" (name key))
+
+                 :else
+                 [(u/qualified-name key) (str value)])))
+       (into {})))

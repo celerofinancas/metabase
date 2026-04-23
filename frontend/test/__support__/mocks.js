@@ -1,32 +1,55 @@
 global.ga = () => {};
 global.snowplow = () => {};
-global.ace.define = () => {};
-global.ace.require = () => {};
 
 global.window.matchMedia = () => ({
-  addListener: () => {},
-  removeListener: () => {},
+  addEventListener: () => {},
+  removeEventListener: () => {},
 });
 
-jest.mock("metabase/lib/analytics");
+/**
+ * jsdom doesn't have scrollBy or scrollTo, so we need to mock it.
+ */
+global.window.HTMLElement.prototype.scrollBy = jest.fn();
+global.window.HTMLElement.prototype.scrollTo = jest.fn();
 
-jest.mock("ace/ace", () => {}, { virtual: true });
-jest.mock("ace/mode-plain_text", () => {}, { virtual: true });
-jest.mock("ace/mode-javascript", () => {}, { virtual: true });
-jest.mock("ace/mode-json", () => {}, { virtual: true });
-jest.mock("ace/mode-clojure", () => {}, { virtual: true });
-jest.mock("ace/mode-ruby", () => {}, { virtual: true });
-jest.mock("ace/mode-html", () => {}, { virtual: true });
-jest.mock("ace/mode-jsx", () => {}, { virtual: true });
-jest.mock("ace/mode-sql", () => {}, { virtual: true });
-jest.mock("ace/mode-mysql", () => {}, { virtual: true });
-jest.mock("ace/mode-pgsql", () => {}, { virtual: true });
-jest.mock("ace/mode-sqlserver", () => {}, { virtual: true });
-jest.mock("ace/snippets/text", () => {}, { virtual: true });
-jest.mock("ace/snippets/sql", () => {}, { virtual: true });
-jest.mock("ace/snippets/mysql", () => {}, { virtual: true });
-jest.mock("ace/snippets/pgsql", () => {}, { virtual: true });
-jest.mock("ace/snippets/sqlserver", () => {}, { virtual: true });
-jest.mock("ace/snippets/json", () => {}, { virtual: true });
-jest.mock("ace/snippets/json", () => {}, { virtual: true });
-jest.mock("ace/ext-language_tools", () => {}, { virtual: true });
+/**
+ * jsdom doesn't have scrollIntoView, so we need to mock it.
+ * Used e.g. under the hood in Mantine's Select component.
+ */
+global.window.HTMLElement.prototype.scrollIntoView = jest.fn();
+
+global.window.ResizeObserver = class ResizeObserver {
+  observe() {}
+
+  unobserve() {}
+
+  disconnect() {}
+};
+
+jest.mock("metabase/utils/analytics");
+
+jest.mock("@uiw/react-codemirror", () => {
+  const { forwardRef } = jest.requireActual("react");
+
+  const MockEditor = forwardRef((props, ref) => {
+    const { indentWithTab, extensions, basicSetup, editable, ...rest } = props;
+    return (
+      // @ts-expect-error: some props types are different on CodeMirror
+      <textarea
+        ref={ref}
+        {...rest}
+        value={props.value ?? ""}
+        // @ts-expect-error: We cannot provide the update argument to onChange
+        onChange={(evt) => props.onChange?.(evt.target.value, undefined)}
+        autoFocus
+        disabled={editable === false}
+      />
+    );
+  });
+
+  return {
+    __esModule: true,
+    ...jest.requireActual("@uiw/react-codemirror"),
+    default: MockEditor,
+  };
+});

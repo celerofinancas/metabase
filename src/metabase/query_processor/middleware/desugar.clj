@@ -1,21 +1,27 @@
 (ns metabase.query-processor.middleware.desugar
-  (:require [medley.core :as m]
-            [metabase.mbql.predicates :as mbql.preds]
-            [metabase.mbql.schema :as mbql.s]
-            [metabase.mbql.util :as mbql.u]
-            [schema.core :as s]))
+  (:refer-clojure :exclude [select-keys])
+  (:require
+   [metabase.lib.core :as lib]
+   [metabase.lib.schema :as lib.schema]
+   [metabase.lib.util.match :as lib.util.match]
+   [metabase.lib.walk :as lib.walk]
+   [metabase.util.malli :as mu]
+   [metabase.util.performance :refer [select-keys]]))
 
-(s/defn ^:private desugar* :- mbql.s/Query
-  [query]
-  (m/update-existing query :query (fn [query]
-                                    (mbql.u/replace query
-                                                    (filter-clause :guard mbql.preds/Filter?)
-                                                    (mbql.u/desugar-filter-clause filter-clause)))))
+(defn- desugar*
+  [stage-or-join]
+  (letfn [(desugar** [x]
+            (lib.util.match/replace-lite x
+              (clause :guard lib/clause?)
+              (lib/desugar-filter-clause clause)))]
+    (merge
+     (desugar** (dissoc stage-or-join :joins :stages :lib/stage-metadata :parameters))
+     (select-keys stage-or-join [:joins :stages :lib/stage-metadata :parameters]))))
 
-(defn desugar
+(mu/defn desugar :- ::lib.schema/query
   "Middleware that uses MBQL lib functions to replace high-level 'syntactic sugar' clauses like `time-interval` and
   `inside` with lower-level clauses like `between`. This is done to minimize the number of MBQL clauses individual
   drivers need to support. Clauses replaced by this middleware are marked `^:sugar` in the MBQL schema."
-  [qp]
-  (fn [query rff context]
-    (qp (desugar* query) rff context)))
+  [query :- ::lib.schema/query]
+  (lib.walk/walk query (fn [_query _path-type _path stage-or-join]
+                         (desugar* stage-or-join))))

@@ -1,81 +1,115 @@
-import React from "react";
-import { render, screen } from "@testing-library/react";
-import DatabaseStep, { DatabaseStepProps } from "./DatabaseStep";
-import { DatabaseDetails, DatabaseInfo } from "../../types";
+import userEvent from "@testing-library/user-event";
+import fetchMock from "fetch-mock";
 
-const ComponentMock = () => <div />;
+import { renderWithProviders, screen, within } from "__support__/ui";
+import {
+  createMockSettingsState,
+  createMockSetupState,
+  createMockState,
+} from "metabase/redux/store/mocks";
+import type { SetupStep } from "metabase/setup/types";
+import type { DatabaseData } from "metabase-types/api";
+import { createMockDatabaseData } from "metabase-types/api/mocks";
 
-jest.mock("metabase/entities/databases", () => ({
-  forms: { setup: jest.fn() },
-  Form: ComponentMock,
-}));
+import { DatabaseStep } from "./DatabaseStep";
 
-jest.mock("metabase/entities/users", () => ({
-  forms: { setup_invite: jest.fn() },
-  Form: ComponentMock,
-}));
+interface SetupOpts {
+  step?: SetupStep;
+  database?: DatabaseData;
+  isEmailConfigured?: boolean;
+}
 
-jest.mock("metabase/containers/DriverWarning", () => ComponentMock);
+const setup = ({
+  step = "db_connection",
+  database,
+  isEmailConfigured = false,
+}: SetupOpts = {}) => {
+  const state = createMockState({
+    setup: createMockSetupState({
+      step,
+      database,
+    }),
+    settings: createMockSettingsState({
+      "email-configured?": isEmailConfigured,
+    }),
+  });
+
+  renderWithProviders(<DatabaseStep stepLabel={0} />, {
+    storeInitialState: state,
+  });
+};
 
 describe("DatabaseStep", () => {
   it("should render in active state", () => {
-    const props = getProps({
-      isStepActive: true,
-      isStepCompleted: false,
-    });
+    setup();
 
-    render(<DatabaseStep {...props} />);
-
-    expect(screen.getByText("Add your data"));
+    expect(screen.getByText("Add your data")).toBeInTheDocument();
   });
 
   it("should render in completed state", () => {
-    const props = getProps({
-      database: getDatabaseInfo({ name: "Test" }),
-      isStepActive: false,
-      isStepCompleted: true,
+    setup({
+      step: "data_usage",
+      database: createMockDatabaseData({ name: "Test" }),
     });
 
-    render(<DatabaseStep {...props} />);
-
-    expect(screen.getByText("Connecting to Test"));
+    expect(screen.getByText("Connecting to Test")).toBeInTheDocument();
   });
 
-  it("should render a user invite form", () => {
-    const props = getProps({
-      isStepActive: true,
+  it("should render a user invite form", async () => {
+    setup({
       isEmailConfigured: true,
     });
 
-    render(<DatabaseStep {...props} />);
+    expect(
+      screen.getByText("Need help connecting to your data?"),
+    ).toBeInTheDocument();
 
-    expect(screen.getByText("Need help connecting to your data?"));
+    await userEvent.click(
+      within(screen.getByRole("button", { name: "Setup section" })).getByRole(
+        "img",
+        { name: "chevrondown icon" },
+      ),
+    );
+
+    expect(screen.getByTestId("invite-user-form")).toBeInTheDocument();
   });
-});
 
-const getProps = (opts?: Partial<DatabaseStepProps>): DatabaseStepProps => ({
-  isEmailConfigured: false,
-  isStepActive: false,
-  isStepCompleted: false,
-  isSetupCompleted: false,
-  onEngineChange: jest.fn(),
-  onStepSelect: jest.fn(),
-  onDatabaseSubmit: jest.fn(),
-  onInviteSubmit: jest.fn(),
-  onStepCancel: jest.fn(),
-  ...opts,
-});
+  it("should handle status properly when invitation request fails", async () => {
+    jest.spyOn(console, "error").mockImplementation(() => {});
 
-const getDatabaseInfo = (opts?: Partial<DatabaseInfo>): DatabaseInfo => ({
-  name: "Database",
-  engine: "postgres",
-  details: getDatabaseDetails(),
-  ...opts,
-});
+    setup({
+      isEmailConfigured: true,
+    });
 
-const getDatabaseDetails = (
-  opts?: Partial<DatabaseDetails>,
-): DatabaseDetails => ({
-  ssl: false,
-  ...opts,
+    const chevronDownIcon = within(
+      screen.getByRole("button", { name: "Setup section" }),
+    ).getByRole("img", { name: "chevrondown icon" });
+
+    await userEvent.click(chevronDownIcon);
+
+    const form = screen.getByTestId("invite-user-form");
+
+    expect(within(form).getByRole("button")).toBeDisabled();
+
+    await userEvent.type(within(form).getByLabelText("First name"), "Jack");
+    await userEvent.type(within(form).getByLabelText("Last name"), "Chan");
+    await userEvent.type(
+      within(form).getByLabelText("Email"),
+      "jack.chan@example.com",
+    );
+
+    expect(within(form).getByRole("button")).toBeEnabled();
+
+    fetchMock.postOnce("/api/user", {
+      status: 400,
+      body: {
+        errors: {
+          email: "This email is not valid",
+        },
+      },
+    });
+    await userEvent.click(within(form).getByRole("button"));
+    await within(form).findByRole("button", { name: "Failed" });
+    await within(form).findByText(/This email is not valid/);
+  });
 });

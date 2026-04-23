@@ -1,19 +1,22 @@
 /* eslint-disable react/prop-types */
-import React, { Component } from "react";
-import PropTypes from "prop-types";
 import cx from "classnames";
+import PropTypes from "prop-types";
+import { Component } from "react";
 
-import { removeAllChildren, parseDataUri } from "metabase/lib/dom";
+import CS from "metabase/css/core/index.css";
+import { parseDataUri } from "metabase/utils/data-url";
+import { connect } from "metabase/utils/redux";
+import {
+  getIsDefaultMetabaseLogo,
+  getLogoUrl,
+} from "metabase-enterprise/settings/selectors";
 
-import { connect } from "react-redux";
-import { getLogoUrl } from "metabase-enterprise/settings/selectors";
-
-const mapStateToProps = state => ({
+const mapStateToProps = (state) => ({
   url: getLogoUrl(state),
+  isDefaultMetabaseLogo: getIsDefaultMetabaseLogo(state),
 });
 
-@connect(mapStateToProps)
-export default class LogoIcon extends Component {
+class LogoIcon extends Component {
   state = {
     svg: null,
   };
@@ -43,13 +46,19 @@ export default class LogoIcon extends Component {
     }
   }
 
-  loadImage(url) {
-    if (this.xhr) {
-      this.xhr.abort();
-      this.xhr = null;
+  componentWillUnmount() {
+    if (this.abortController) {
+      this.abortController.abort();
+      this.abortController = null;
+    }
+  }
+
+  async loadImage(url) {
+    if (this.abortController) {
+      this.abortController.abort();
     }
 
-    removeAllChildren(this._container);
+    this._container.replaceChildren();
 
     const parsed = parseDataUri(url);
     if (parsed) {
@@ -66,33 +75,41 @@ export default class LogoIcon extends Component {
         this.loadImageFallback(url);
       }
     } else {
-      const xhr = (this.xhr = new XMLHttpRequest());
-      xhr.open("GET", url);
-      xhr.onload = () => {
-        if (xhr.status < 200 || xhr.status >= 300) {
+      this.abortController = new AbortController();
+      try {
+        const response = await fetch(url, {
+          signal: this.abortController.signal,
+        });
+
+        if (!response.ok) {
+          this.loadImageFallback(url);
           return;
         }
-        const svg =
-          xhr.responseXML && xhr.responseXML.getElementsByTagName("svg")[0];
+
+        const text = await response.text();
+        const parser = new DOMParser();
+        const doc = parser.parseFromString(text, "image/svg+xml");
+        const svg = doc.getElementsByTagName("svg")[0];
+
         if (svg) {
           svg.setAttribute("fill", "currentcolor");
           this.updateSize(svg);
 
-          removeAllChildren(this._container);
+          this._container.replaceChildren();
           this._container.appendChild(svg);
         } else {
           this.loadImageFallback(url);
         }
-      };
-      xhr.onerror = () => {
-        this.loadImageFallback(url);
-      };
-      xhr.send();
+      } catch (error) {
+        if (error.name !== "AbortError") {
+          this.loadImageFallback(url);
+        }
+      }
     }
   }
 
   loadImageFallback(url) {
-    removeAllChildren(this._container);
+    this._container.replaceChildren();
 
     const img = document.createElement("img");
     img.src = url;
@@ -114,22 +131,44 @@ export default class LogoIcon extends Component {
     } else {
       element.removeAttribute("height");
     }
+    element.style.maxWidth = "100%";
+    element.style.maxHeight = "32px";
+    element.style.minHeight = "100%";
+    element.style.height = "auto";
   }
 
   render() {
-    const { dark, style, className } = this.props;
+    const {
+      dark,
+      style = {},
+      height,
+      className,
+      isDefaultMetabaseLogo,
+    } = this.props;
+
     return (
       <span
-        ref={c => (this._container = c)}
+        ref={(c) => (this._container = c)}
         className={cx(
-          "Icon text-centered",
-          { "text-brand": !dark },
-          { "text-white": dark },
+          "Icon",
+          CS.textCentered,
+          // If using the Metabase logo, use the non-whitelabeled Metabase brand color.
+          {
+            [isDefaultMetabaseLogo ? CS.textMetabaseBrand : CS.textBrand]:
+              !dark,
+          },
+          { [CS.textWhite]: dark },
           className,
         )}
-        style={style}
+        style={{
+          ...style,
+          height: style.height || height || "32px",
+        }}
         data-testid="main-logo"
       />
     );
   }
 }
+
+// eslint-disable-next-line import/no-default-export -- deprecated usage
+export default connect(mapStateToProps)(LogoIcon);

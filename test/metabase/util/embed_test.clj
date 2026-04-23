@@ -1,22 +1,30 @@
 (ns metabase.util.embed-test
-  (:require [buddy.sign.jwt :as jwt]
-            [clojure.test :refer :all]
-            [crypto.random :as crypto-random]
-            [metabase.test :as mt]
-            [metabase.util.embed :as embed]))
+  (:require
+   [clojure.test :refer :all]
+   [java-time.api :as t]
+   [metabase.test :as mt]
+   [metabase.util :as u]
+   [toucan2.core :as t2]))
 
-(def ^:private ^String token-with-alg-none
-  "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJhZG1pbiI6dHJ1ZX0.3Dbtd6Z0yuSfw62fOzBGHyiL0BJp3pod_PZE-BBdR-I")
-
-(deftest ^:parallel validate-token-test
-  (testing "check that are token is in fact valid"
-    (is (= {:admin true}
-           (jwt/unsign token-with-alg-none "")))))
-
-(deftest disallow-unsigned-tokens-test
-  (testing "check that we disallow tokens signed with alg = none"
-    (mt/with-temporary-setting-values [embedding-secret-key (crypto-random/hex 32)]
-      (is (thrown-with-msg?
-           clojure.lang.ExceptionInfo
-           #"JWT `alg` cannot be `none`"
-           (embed/unsign token-with-alg-none))))))
+(deftest maybe-populate-initially-published-at-test
+  (let [now #t "2022-09-01T12:34:56Z"]
+    (doseq [model [:model/Card :model/Dashboard]]
+      (testing "should populate `initially_published_at` when a Card's enable_embedding is changed to true"
+        (mt/with-temp [model card {:enable_embedding false}]
+          (is (nil? (:initially_published_at card)))
+          (t2/update! model (u/the-id card) {:enable_embedding true})
+          (is (some? (t2/select-one-fn :initially_published_at model :id (u/the-id card))))))
+      (testing "should keep `initially_published_at` value when a Card's enable_embedding is changed to false"
+        (mt/with-temp [model card {:enable_embedding true :initially_published_at now}]
+          (is (some? (:initially_published_at card)))
+          (t2/update! model (u/the-id card) {:enable_embedding false})
+          (is (= (t/offset-date-time now) (t2/select-one-fn :initially_published_at model :id (u/the-id card))))))
+      (testing "should keep `initially_published_at` value when `enable_embedding` is already set to true"
+        (mt/with-temp [model card {:enable_embedding true :initially_published_at now}]
+          (t2/update! model (u/the-id card) {:enable_embedding true})
+          (is (= (t/offset-date-time now) (t2/select-one-fn :initially_published_at model :id (u/the-id card))))))
+      (testing "should keep `initially_published_at` value when `enable_embedding` is already set to false"
+        (mt/with-temp [model card {:enable_embedding false}]
+          (is (nil? (:initially_published_at card)))
+          (t2/update! model (u/the-id card) {:enable_embedding false})
+          (is (nil? (t2/select-one-fn :initially_published_at model :id (u/the-id card)))))))))

@@ -1,18 +1,14 @@
 /* eslint-disable react/prop-types */
-import React from "react";
-
 import { t } from "ttag";
 
-import EmptyState from "metabase/components/EmptyState";
-
-import { getSettingDefintionsForColumn } from "metabase/visualizations/lib/settings/column";
-import {
-  getSettingsWidgets,
-  getComputedSettings,
-} from "metabase/visualizations/lib/settings";
-
-import ChartSettingsWidget from "metabase/visualizations/components/ChartSettingsWidget";
 import NoResults from "assets/img/no_results.svg";
+import { EmptyState } from "metabase/common/components/EmptyState";
+import ChartSettingsWidget from "metabase/visualizations/components/ChartSettingsWidget";
+import {
+  getComputedSettings,
+  getSettingsWidgets,
+} from "metabase/visualizations/lib/settings";
+import { getSettingDefinitionsForColumn } from "metabase/visualizations/lib/settings/column";
 
 function getWidgets({
   column,
@@ -22,6 +18,7 @@ function getWidgets({
   onChangeSetting,
   allowlist,
   denylist,
+  extraData,
 }) {
   // fake series
   const series = [{ card: {}, data: { rows: [], cols: [] } }];
@@ -31,13 +28,13 @@ function getWidgets({
     column = { ...column, unit: "default" };
   }
 
-  const settingsDefs = getSettingDefintionsForColumn(series, column);
+  const settingsDefs = getSettingDefinitionsForColumn(series, column);
 
   const computedSettings = getComputedSettings(
     settingsDefs,
     column,
     { ...inheritedSettings, ...storedSettings },
-    { series },
+    { series, ...extraData },
   );
 
   const widgets = getSettingsWidgets(
@@ -45,7 +42,7 @@ function getWidgets({
     storedSettings,
     computedSettings,
     column,
-    changedSettings => {
+    (changedSettings) => {
       if (onChange) {
         onChange({ ...storedSettings, ...changedSettings });
       }
@@ -53,11 +50,11 @@ function getWidgets({
         onChangeSetting(changedSettings);
       }
     },
-    { series },
+    { series, ...extraData },
   );
 
   return widgets.filter(
-    widget =>
+    (widget) =>
       (!allowlist || allowlist.has(widget.id)) &&
       (!denylist || !denylist.has(widget.id)),
   );
@@ -68,32 +65,27 @@ export function hasColumnSettingsWidgets({ value, ...props }) {
   return getWidgets({ storedSettings, ...props }).length > 0;
 }
 
-const ColumnSettings = ({
+export const ColumnSettings = ({
+  style,
   value,
   variant = "default",
-  forcefullyShowHiddenSettings = false,
   ...props
 }) => {
   const storedSettings = value || {};
   const widgets = getWidgets({ storedSettings, ...props });
-  const extraWidgetProps = {};
-
-  if (forcefullyShowHiddenSettings) {
-    // Is used for /settings/localization page to list all the date-time settings
-    // Consider using independent form UI there
-    extraWidgetProps.hidden = false;
-  }
 
   return (
-    <div style={{ maxWidth: 300 }}>
+    <div style={{ maxWidth: 300, ...style }} data-testid="column-settings">
       {widgets.length > 0 ? (
-        widgets.map(widget => (
+        widgets.map((widget) => (
           <ChartSettingsWidget
             key={widget.id}
             {...widget}
-            {...extraWidgetProps}
             unset={storedSettings[widget.id] === undefined}
-            noPadding
+            style={{
+              marginLeft: 0,
+              marginRight: 0,
+            }}
             variant={variant}
           />
         ))
@@ -106,5 +98,3 @@ const ColumnSettings = ({
     </div>
   );
 };
-
-export default ColumnSettings;

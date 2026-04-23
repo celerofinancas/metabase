@@ -1,11 +1,10 @@
 /* eslint-disable react/prop-types */
-import React from "react";
+import { Component } from "react";
 import { withRouter } from "react-router";
 
-@withRouter
-class ScrollToTop extends React.Component {
+class ScrollToTopInner extends Component {
   componentDidUpdate(prevProps) {
-    // Compare location.pathame to see if we're on a different URL. Do this to ensure
+    // Compare location.pathname to see if we're on a different URL. Do this to ensure
     // that query strings don't cause a scroll to the top
     if (this.props.location.pathname !== prevProps.location.pathname) {
       window.scrollTo(0, 0);
@@ -16,4 +15,7 @@ class ScrollToTop extends React.Component {
   }
 }
 
+const ScrollToTop = withRouter(ScrollToTopInner);
+
+// eslint-disable-next-line import/no-default-export -- deprecated usage
 export default ScrollToTop;

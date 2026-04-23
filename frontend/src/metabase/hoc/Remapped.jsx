@@ -1,9 +1,9 @@
 /* eslint-disable react/prop-types */
-import React, { Component } from "react";
-import { connect } from "react-redux";
+import { Component } from "react";
 
-import { getMetadata } from "metabase/selectors/metadata";
 import { fetchRemapping } from "metabase/redux/metadata";
+import { getMetadata } from "metabase/selectors/metadata";
+import { connect } from "metabase/utils/redux";
 
 const mapStateToProps = (state, props) => ({
   metadata: getMetadata(state, props),
@@ -13,7 +13,11 @@ const mapDispatchToProps = {
   fetchRemapping,
 };
 
-export default ComposedComponent =>
+/**
+ * @deprecated HOCs are deprecated
+ */
+// eslint-disable-next-line import/no-default-export -- deprecated usage
+export default (ComposedComponent) =>
   connect(
     mapStateToProps,
     mapDispatchToProps,
@@ -26,23 +30,43 @@ export default ComposedComponent =>
 
       UNSAFE_componentWillMount() {
         if (this.props.column) {
-          this.props.fetchRemapping(this.props.value, this.props.column.id);
+          this.props.fetchRemapping({
+            parameter: this.props.parameter,
+            value: this.props.value,
+            field: this.props.column,
+            cardId: this.props.cardId,
+            dashboardId: this.props.dashboardId,
+            uuid: this.props.uuid,
+            token: this.props.token,
+          });
         }
       }
       UNSAFE_componentWillReceiveProps(nextProps) {
         if (
           nextProps.column &&
           (this.props.value !== nextProps.value ||
-            this.props.column !== nextProps.column)
+            this.props.column?.id !== nextProps.column.id ||
+            this.props.parameter?.id !== nextProps.parameter?.id ||
+            this.props.cardId !== nextProps.cardId ||
+            this.props.dashboardId !== nextProps.dashboardId ||
+            this.props.uuid !== nextProps.uuid ||
+            this.props.token !== nextProps.token)
         ) {
-          this.props.fetchRemapping(nextProps.value, nextProps.column.id);
+          this.props.fetchRemapping({
+            parameter: nextProps.parameter,
+            value: nextProps.value,
+            field: this.props.column,
+            cardId: nextProps.cardId,
+            dashboardId: nextProps.dashboardId,
+            uuid: nextProps.uuid,
+            token: nextProps.token,
+          });
         }
       }
 
       render() {
-        // eslint-disable-next-line no-unused-vars
         const { metadata, fetchRemapping, ...props } = this.props;
-        const field = metadata.field(props.column && props.column.id);
+        const field = props.column;
         const displayValue = field && field.remappedValue(props.value);
         const displayColumn =
           (displayValue != null && field && field.remappedField()) || null;

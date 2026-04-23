@@ -1,16 +1,55 @@
-import { createEntity } from "metabase/lib/entities";
-
+import {
+  segmentApi,
+  useGetSegmentQuery,
+  useListSegmentsQuery,
+} from "metabase/api";
 import { SegmentSchema } from "metabase/schema";
-import { color } from "metabase/lib/colors";
-import * as Urls from "metabase/lib/urls";
-
 import { getMetadata } from "metabase/selectors/metadata";
+import { color } from "metabase/ui/colors";
+import { createEntity, entityCompatibleQuery } from "metabase/utils/entities";
 
-const Segments = createEntity({
+/**
+ * @deprecated use "metabase/api" instead
+ */
+export const Segments = createEntity({
   name: "segments",
   nameOne: "segment",
   path: "/api/segment",
   schema: SegmentSchema,
+
+  rtk: {
+    getUseGetQuery: () => ({
+      useGetQuery,
+    }),
+    useListQuery: useListSegmentsQuery,
+  },
+
+  api: {
+    list: (entityQuery, dispatch) =>
+      entityCompatibleQuery(
+        entityQuery,
+        dispatch,
+        segmentApi.endpoints.listSegments,
+      ),
+    get: (entityQuery, options, dispatch) =>
+      entityCompatibleQuery(
+        entityQuery.id,
+        dispatch,
+        segmentApi.endpoints.getSegment,
+      ),
+    create: (entityQuery, dispatch) =>
+      entityCompatibleQuery(
+        entityQuery,
+        dispatch,
+        segmentApi.endpoints.createSegment,
+      ),
+    update: (entityQuery, dispatch) =>
+      entityCompatibleQuery(
+        entityQuery,
+        dispatch,
+        segmentApi.endpoints.updateSegment,
+      ),
+  },
 
   objectActions: {
     setArchived: (
@@ -28,21 +67,11 @@ const Segments = createEntity({
   },
 
   objectSelectors: {
-    getName: segment => segment && segment.name,
-    getUrl: segment =>
-      Urls.tableRowsQuery(
-        segment.database_id,
-        segment.table_id,
-        null,
-        segment.id,
-      ),
-    getColor: segment => color("accent7"),
-    getIcon: segment => ({ name: "segment" }),
-  },
-
-  form: {
-    fields: [{ name: "name" }, { name: "description", type: "text" }],
+    getName: (segment) => segment && segment.name,
+    getColor: (segment) => color("filter"),
   },
 });
 
-export default Segments;
+const useGetQuery = ({ id }, options) => {
+  return useGetSegmentQuery(id, options);
+};

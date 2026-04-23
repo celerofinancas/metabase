@@ -1,46 +1,139 @@
-import { assocIn } from "icepick";
+import { updateIn } from "icepick";
+import { t } from "ttag";
 
-import { createEntity, undo } from "metabase/lib/entities";
-import * as Urls from "metabase/lib/urls";
-import { color } from "metabase/lib/colors";
-
+import { cardApi, useGetCardQuery, useListCardsQuery } from "metabase/api";
 import {
   canonicalCollectionId,
+  isRootTrashCollection,
+} from "metabase/collections/utils";
+import {
+  Collections,
   getCollectionType,
   normalizedCollection,
 } from "metabase/entities/collections";
+import {
+  API_UPDATE_QUESTION,
+  SOFT_RELOAD_CARD,
+} from "metabase/redux/query-builder";
+import {
+  getMetadata,
+  getMetadataUnfiltered,
+} from "metabase/selectors/metadata";
+import { color } from "metabase/ui/colors";
+import {
+  createEntity,
+  entityCompatibleQuery,
+  undo,
+} from "metabase/utils/entities";
 
-import { POST, DELETE } from "metabase/lib/api";
+export const INJECT_RTK_QUERY_QUESTION_VALUE =
+  "metabase/entities/questions/FETCH_ADHOC_METADATA";
 
-import forms from "./questions/forms";
-
-const FAVORITE_ACTION = `metabase/entities/questions/FAVORITE`;
-const UNFAVORITE_ACTION = `metabase/entities/questions/UNFAVORITE`;
-
-const Questions = createEntity({
+/**
+ * @deprecated use "metabase/api" instead
+ */
+export const Questions = createEntity({
   name: "questions",
   nameOne: "question",
   path: "/api/card",
 
+  rtk: {
+    getUseGetQuery: () => ({
+      useGetQuery: useGetCardQuery,
+    }),
+    useListQuery: useListCardsQuery,
+  },
+
   api: {
-    favorite: POST("/api/card/:id/favorite"),
-    unfavorite: DELETE("/api/card/:id/favorite"),
+    list: (entityQuery, dispatch) =>
+      entityCompatibleQuery(entityQuery, dispatch, cardApi.endpoints.listCards),
+    get: (entityQuery, options, dispatch) =>
+      entityCompatibleQuery(
+        { ...entityQuery, ignore_error: options?.noEvent },
+        dispatch,
+        cardApi.endpoints.getCard,
+      ),
+    create: (entityQuery, dispatch) => {
+      const { collection_id, dashboard_id, dashboard_tab_id, ...rest } =
+        entityQuery;
+
+      const destination = dashboard_id
+        ? { dashboard_id, dashboard_tab_id }
+        : { collection_id };
+
+      return entityCompatibleQuery(
+        { ...rest, ...destination },
+        dispatch,
+        cardApi.endpoints.createCard,
+      );
+    },
+    update: (entityQuery, dispatch) => {
+      return entityCompatibleQuery(
+        entityQuery,
+        dispatch,
+        cardApi.endpoints.updateCard,
+      );
+    },
+    delete: ({ id }, dispatch) =>
+      entityCompatibleQuery(id, dispatch, cardApi.endpoints.deleteCard),
   },
 
   objectActions: {
-    setArchived: ({ id }, archived, opts) =>
+    setArchived: (card, archived, opts) =>
       Questions.actions.update(
-        { id },
+        { id: card.id },
         { archived },
-        undo(opts, "question", archived ? "archived" : "unarchived"),
+        undo(opts, getLabel(card), archived ? t`trashed` : t`restored`),
       ),
 
-    setCollection: ({ id }, collection, opts) =>
-      Questions.actions.update(
-        { id },
-        { collection_id: canonicalCollectionId(collection && collection.id) },
-        undo(opts, "question", "moved"),
-      ),
+    // NOTE: standard questions (i.e. not models, metrics, etc.) can live in dashboards as well as collections.
+    // this function name is incorrect but maintained for consistency with other entities.
+    setCollection: (card, destination, opts) => {
+      return async (dispatch) => {
+        const archived =
+          destination.model === "collection" &&
+          isRootTrashCollection(destination);
+
+        const update =
+          destination.model === "dashboard"
+            ? {
+                dashboard_id: destination.id,
+                archived,
+                delete_old_dashcards: true,
+              }
+            : {
+                collection_id: canonicalCollectionId(destination.id),
+                dashboard_id: null,
+                archived,
+              };
+
+        const result = await dispatch(
+          Questions.actions.update(
+            { id: card.id },
+            update,
+            undo(opts, getLabel(card), t`moved`),
+          ),
+        );
+
+        dispatch(
+          Collections.actions.fetchList(
+            {
+              tree: true,
+              "exclude-archived": true,
+            },
+            { reload: true },
+          ),
+        );
+
+        const updatedCard = result?.payload?.question;
+
+        if (updatedCard) {
+          dispatch({ type: API_UPDATE_QUESTION, payload: updatedCard });
+        }
+
+        return result;
+      };
+    },
 
     setPinned: ({ id }, pinned, opts) =>
       Questions.actions.update(
@@ -52,71 +145,89 @@ const Questions = createEntity({
         opts,
       ),
 
-    setFavorited: async ({ id }, favorite) => {
-      if (favorite) {
-        await Questions.api.favorite({ id });
-        return { type: FAVORITE_ACTION, payload: id };
-      } else {
-        await Questions.api.unfavorite({ id });
-        return { type: UNFAVORITE_ACTION, payload: id };
-      }
+    setCollectionPreview: ({ id }, collection_preview, opts) =>
+      Questions.actions.update({ id }, { collection_preview }, opts),
+  },
+
+  selectors: {
+    getObject: (state, { entityId }) => getMetadata(state).question(entityId),
+    getObjectUnfiltered: (state, { entityId }) =>
+      getMetadataUnfiltered(state).question(entityId),
+    getListUnfiltered: (state, { entityQuery }) => {
+      const entityIds =
+        Questions.selectors.getEntityIds(state, { entityQuery }) ?? [];
+      return entityIds.map((entityId) =>
+        Questions.selectors.getObjectUnfiltered(state, { entityId }),
+      );
     },
   },
 
   objectSelectors: {
-    getName: question => question && question.name,
-    getUrl: question => question && Urls.question(question),
-    getColor: () => color("text-medium"),
-    getCollection: question =>
-      question && normalizedCollection(question.collection),
-    getIcon,
+    getName: (card) => card && card.name,
+    getColor: () => color("text-secondary"),
+    getCollection: (card) => card && normalizedCollection(card.collection),
   },
 
   reducer: (state = {}, { type, payload, error }) => {
-    if (type === FAVORITE_ACTION && !error) {
-      return assocIn(state, [payload, "favorite"], true);
-    } else if (type === UNFAVORITE_ACTION && !error) {
-      return assocIn(state, [payload, "favorite"], false);
+    if (type === SOFT_RELOAD_CARD) {
+      const { id } = payload;
+      const latestReview = payload.moderation_reviews?.find(
+        (x) => x.most_recent,
+      );
+
+      if (latestReview) {
+        return updateIn(state, [id], (question) => ({
+          ...question,
+          moderated_status: latestReview.status,
+        }));
+      }
+    }
+
+    if (type === INJECT_RTK_QUERY_QUESTION_VALUE) {
+      const { id } = payload;
+
+      return updateIn(state, [id], (question) => ({ ...question, ...payload }));
     }
     return state;
   },
 
-  // NOTE: keep in sync with src/metabase/api/card.clj
+  // NOTE: keep in sync with src/metabase/queries_rest/api/card.clj
   writableProperties: [
     "name",
     "cache_ttl",
-    "dataset",
+    "type",
     "dataset_query",
     "display",
     "description",
     "visualization_settings",
+    "parameters",
+    "parameter_mappings",
     "archived",
     "enable_embedding",
     "embedding_params",
     "collection_id",
+    "dashboard_id",
+    "dashboard_tab_id",
     "collection_position",
+    "collection_preview",
     "result_metadata",
-    "metadata_checksum",
+    "delete_old_dashcards",
   ],
 
   getAnalyticsMetadata([object], { action }, getState) {
     const type = object && getCollectionType(object.collection_id, getState());
     return type && `collection=${type}`;
   },
-
-  forms,
 });
 
-function getIcon(question) {
-  if (question.dataset || question.model === "dataset") {
-    return { name: "model" };
+function getLabel(card) {
+  if (card.type === "model" || card.model === "dataset") {
+    return t`model`;
   }
-  const visualization = require("metabase/visualizations").default.get(
-    question.display,
-  );
-  return {
-    name: visualization?.iconName ?? "beaker",
-  };
-}
 
-export default Questions;
+  if (card.type === "metric" || card.model === "metric") {
+    return t`metric`;
+  }
+
+  return t`question`;
+}

@@ -1,81 +1,109 @@
 (ns metabase-enterprise.serialization.cmd-test
-  (:require [clojure.test :as t]
-            [clojure.tools.logging :as log]
-            [metabase-enterprise.serialization.load :as load]
-            [metabase.cmd :as cmd]
-            [metabase.db.schema-migrations-test.impl :as schema-migrations-test.impl]
-            [metabase.models :refer [Card Database User]]
-            [metabase.models.permissions-group :as group]
-            [metabase.test :as mt]
-            [metabase.test.fixtures :as fixtures]
-            [metabase.util :as u]
-            [toucan.db :as db])
-  (:import java.util.UUID))
+  (:require
+   [clojure.java.io :as io]
+   [clojure.test :refer :all]
+   [metabase-enterprise.serialization.test-util :as ts]
+   [metabase-enterprise.serialization.v2.extract :as v2.extract]
+   [metabase-enterprise.serialization.v2.ingest :as v2.ingest]
+   [metabase-enterprise.serialization.v2.storage :as v2.storage]
+   [metabase.analytics.snowplow-test :as snowplow-test]
+   [metabase.cmd.core :as cmd]
+   [metabase.test :as mt]
+   [metabase.test.fixtures :as fixtures]))
 
-(t/use-fixtures :once (fixtures/initialize :db :test-users))
+(set! *warn-on-reflection* true)
 
-(defmacro ^:private with-empty-h2-app-db
-  "Runs `body` under a new, blank, H2 application database (randomly named), in which all model tables have been
-  created via Liquibase schema migrations. After `body` is finished, the original app DB bindings are restored.
+(use-fixtures :once (fixtures/initialize :db :test-users))
 
-  Makes use of functionality in the `metabase.db.schema-migrations-test.impl` namespace since that already does
-  what we need."
-  [& body]
-  `(schema-migrations-test.impl/with-temp-empty-app-db [conn# :h2]
-     (schema-migrations-test.impl/run-migrations-in-range! conn# [0 "v99.00-000"]) ; this should catch all migrations)
-     ;; since the actual group defs are not dynamic, we need with-redefs to change them here
-     (with-redefs [group/all-users (#'group/get-or-create-magic-group! group/all-users-group-name)
-                   group/admin     (#'group/get-or-create-magic-group! group/admin-group-name)
-                   group/metabot   (#'group/get-or-create-magic-group! group/metabot-group-name)]
-       ~@body)))
+(deftest dump-readonly-dir-test
+  (testing "command exits early when destination is not writable"
+    (mt/with-premium-features #{:serialization}
+      (ts/with-random-dump-dir [dump-dir "serdesv2-"]
+        (.mkdirs (io/file dump-dir))
+        (.setWritable (io/file dump-dir) false)
+        (with-redefs [v2.extract/extract (fn [& _args]
+                                           (throw (ex-info "Do not call me!" {})))]
+          (is (thrown-with-msg? Exception #"Destination path is not writeable: "
+                                (cmd/export dump-dir))))))))
 
-(t/deftest no-collections-test
-  (t/testing "Dumping a card when there are no active collection should work properly (#16931)"
-    ;; we need a blank H2 app db, temporarily, in order to run this test (to ensure we have no collections present,
-    ;; while also not deleting or messing with any existing user personal collections that the real app DB might have,
-    ;; since that will interfere with other tests)
-    ;;
-    ;; making use of the functionality in the [[metabase.db.schema-migrations-test.impl]] namespace for this (since it
-    ;; already does what we need)
-    (with-empty-h2-app-db
-      ;; create a single dummy User to own a Card and a Database for it to reference
-      (let [user (db/simple-insert! User
-                   :email        "nobody@nowhere.com"
-                   :first_name   (mt/random-name)
-                   :last_name    (mt/random-name)
-                   :password     (str (UUID/randomUUID))
-                   :date_joined  :%now
-                   :is_active    true
-                   :is_superuser true)
-            db   (db/simple-insert! Database
-                   :name       "Test Database"
-                   :engine     "h2"
-                   :details    "{}"
-                   :created_at :%now
-                   :updated_at :%now)]
-        ;; then the card itself
-        (db/simple-insert! Card
-          :name                   "Single Card"
-          :display                "Single Card"
-          :database_id            (u/the-id db)
-          :dataset_query          "{}"
-          :creator_id             (u/the-id user)
-          :visualization_settings "{}"
-          :created_at             :%now
-          :updated_at             :%now)
-        ;; serialize "everything" (which should just be the card and user), which should succeed if #16931 is fixed
-        (cmd/dump (str (System/getProperty "java.io.tmpdir") "/" (mt/random-name)))))))
+(deftest snowplow-events-test
+  (testing "Snowplow events are correctly sent"
+    (mt/with-premium-features #{:serialization}
+      (mt/with-empty-h2-app-db!
+        (snowplow-test/with-fake-snowplow-collector
+          (ts/with-random-dump-dir [dump-dir "serdesv2-"]
+            (let [coll (ts/create! :model/Collection :name "coll")
+                  _card (ts/create! :model/Card :name "card" :collection_id (:id coll))]
+              (cmd/export dump-dir "--collection" (str (:id coll)) "--no-data-model")
+              (testing "Snowplow export event was sent"
+                (is (=? {"event"           "serialization"
+                         "direction"       "export"
+                         "collection"      (str (:id coll))
+                         "all_collections" false
+                         "data_model"      false
+                         "settings"        true
+                         "field_values"    false
+                         "duration_ms"     pos?
+                         "count"           12
+                         "source"          "cli"
+                         "secrets"         false
+                         "success"         true
+                         "error_message"   nil}
+                        (->> (map :data (snowplow-test/pop-event-data-and-user-id!))
+                             (filter #(= "serialization" (get % "event")))
+                             first))))
 
-(t/deftest blank-target-db-test
-  (t/testing "Loading a dump into an empty app DB still works (#16639)"
-    (let [dump-dir                 (str (System/getProperty "java.io.tmpdir") "/" (mt/random-name))
-          user-pre-insert-called?  (atom false)]
-      (log/infof "Dumping to %s" dump-dir)
-      (cmd/dump dump-dir "--user" "crowberto@metabase.com")
-      (with-empty-h2-app-db
-        (with-redefs [load/pre-insert-user  (fn [user]
-                                              (reset! user-pre-insert-called? true)
-                                              (assoc user :password "test-password"))]
-          (cmd/load dump-dir "--mode"     :update
-                             "--on-error" :abort)
-          (t/is (true? @user-pre-insert-called?)))))))
+              (testing "Snowplow import event was sent"
+                (cmd/import dump-dir)
+                (is (=? {"event"         "serialization"
+                         "direction"     "import"
+                         "duration_ms"   pos?
+                         "source"        "cli"
+                         "models"        "Card,Collection,PythonLibrary,Setting,TransformJob,TransformTag"
+                         "count"         12
+                         "success"       true
+                         "error_message" nil}
+                        (-> (snowplow-test/pop-event-data-and-user-id!) first :data))))
+
+              (with-redefs [v2.storage/store! (fn [_stream _backend]
+                                                (throw (Exception. "Cannot load settings")))]
+                (is (thrown? Exception
+                             (cmd/export dump-dir "--collection" (str (:id coll)) "--no-data-model")))
+                (testing "Snowplow export event about error was sent"
+                  (is (=? {"event"           "serialization"
+                           "direction"       "export"
+                           "collection"      (str (:id coll))
+                           "all_collections" false
+                           "data_model"      false
+                           "settings"        true
+                           "field_values"    false
+                           "duration_ms"     pos?
+                           "count"           0
+                           "source"          "cli"
+                           "secrets"         false
+                           "success"         false
+                           "error_message"   "Cannot load settings"}
+                          (->> (map :data (snowplow-test/pop-event-data-and-user-id!))
+                               (filter #(= "serialization" (get % "event")))
+                               first)))))
+
+              (let [ingest-file @#'v2.ingest/ingest-file]
+                ;; overriding ingest-file is weird, but ingest-one is a protocol function and with-redefs won't
+                ;; override that reliably
+                (with-redefs [v2.ingest/ingest-file (fn [^java.io.File file]
+                                                      (cond-> (ingest-file file)
+                                                        (= (.getName file) "card.yaml")
+                                                        (assoc :collection_id "DoesNotExist")))]
+                  (is (thrown? Exception
+                               (cmd/import dump-dir)))
+                  (testing "Snowplow import event about error was sent"
+                    (is (=? {"event"         "serialization"
+                             "direction"     "import"
+                             "duration_ms"   pos?
+                             "source"        "cli"
+                             "models"        ""
+                             "count"         0
+                             "success"       false
+                             ;; t2/with-transactions re-wraps errors with data about toucan connections
+                             "error_message" #"Collection 'DoesNotExist' was not found.*"}
+                            (-> (snowplow-test/pop-event-data-and-user-id!) first :data)))))))))))))

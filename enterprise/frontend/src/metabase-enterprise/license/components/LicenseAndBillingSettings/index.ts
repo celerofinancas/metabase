@@ -1,1 +1,1 @@
-export { default } from "./LicenseAndBillingSettings";
+export * from "./LicenseAndBillingSettings";

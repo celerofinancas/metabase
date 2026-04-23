@@ -1,8 +1,8 @@
 (ns metabase.cmd.migrate
-  (:require [metabase.db.connection :as mdb.connection]
-            [metabase.db.setup :as mdb.setup]))
+  (:require
+   [metabase.app-db.core :as mdb]))
 
 (defn migrate!
   "Migrate the Metabase application DB."
   [direction]
-  (mdb.setup/migrate! (mdb.connection/jdbc-spec) (keyword direction)))
+  (mdb/migrate! (mdb/data-source) (keyword direction)))

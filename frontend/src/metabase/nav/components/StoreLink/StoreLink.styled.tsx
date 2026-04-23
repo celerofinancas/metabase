@@ -1,26 +1,35 @@
-import styled from "styled-components";
+// eslint-disable-next-line no-restricted-imports
+import styled from "@emotion/styled";
 
-import { color, darken } from "metabase/lib/colors";
-import { space } from "metabase/styled-components/theme";
-import Icon, { IconWrapper } from "metabase/components/Icon";
-import ExternalLink from "metabase/core/components/ExternalLink";
-import { forwardRefToInnerRef } from "metabase/styled-components/utils";
+import { ExternalLink } from "metabase/common/components/ExternalLink";
+import { Icon } from "metabase/ui";
+import { darken } from "metabase/ui/colors";
 
-export const StoreIconRoot = forwardRefToInnerRef(
-  styled(ExternalLink)`
-    margin-right: ${space(1)};
-  `,
-);
+export const StoreIconRoot = styled(ExternalLink)`
+  margin-right: var(--mantine-spacing-sm);
+`;
 
-export const StoreIconWrapper = styled(IconWrapper)`
-  color: ${color("white")};
+export const StoreIconWrapper = styled.div`
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 6px;
+  cursor: pointer;
+  color: var(--mb-color-text-primary-inverse);
+  transition: all 300ms ease-in-out;
 
   &:hover {
-    color: ${color("white")};
-    background-color: ${darken(color("accent7"))};
+    color: var(--mb-color-text-primary-inverse);
+    background-color: ${() => darken("filter")};
+  }
+
+  @media (prefers-reduced-motion) {
+    transition: none;
   }
 `;
 
 export const StoreIcon = styled(Icon)`
-  margin: ${space(1)};
+  margin: var(--mantine-spacing-sm);
 `;

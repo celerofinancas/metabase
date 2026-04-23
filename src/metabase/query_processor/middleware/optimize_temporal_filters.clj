@@ -1,182 +1,312 @@
 (ns metabase.query-processor.middleware.optimize-temporal-filters
-  "Middlware that optimizes equality filter clauses against bucketed temporal fields. See docstring for
+  "Middleware that optimizes equality filter clauses against bucketed temporal fields. See docstring for
   `optimize-temporal-filters` for more details."
-  (:require [clojure.tools.logging :as log]
-            [clojure.walk :as walk]
-            [metabase.mbql.util :as mbql.u]
-            [metabase.util :as u]
-            [metabase.util.date-2 :as u.date]
-            [metabase.util.i18n :refer [trs]]
-            [schema.core :as s]))
+  (:refer-clojure :exclude [get-in])
+  (:require
+   [better-cond.core :as b]
+   [metabase.lib.core :as lib]
+   [metabase.lib.schema :as lib.schema]
+   [metabase.lib.schema.common :as lib.schema.common]
+   [metabase.lib.schema.expression :as lib.schema.expression]
+   [metabase.lib.schema.mbql-clause :as lib.schema.mbql-clause]
+   [metabase.lib.util.match :as lib.util.match]
+   [metabase.lib.walk :as lib.walk]
+   [metabase.util :as u]
+   [metabase.util.date-2 :as u.date]
+   [metabase.util.log :as log]
+   [metabase.util.malli :as mu]
+   [metabase.util.malli.registry :as mr]
+   [metabase.util.performance :refer [get-in]]))
 
 (def ^:private optimizable-units
   #{:second :minute :hour :day :week :month :quarter :year})
 
-(defn- temporal-unit [field]
-  (mbql.u/match-one field [:field _ (opts :guard :temporal-unit)] (:temporal-unit opts)))
+(defn- temporal-ref? [x]
+  (and (lib/clause-of-type? x #{:field :expression})
+       (or (lib/raw-temporal-bucket x)
+           (let [[_field opts _id-or-name] x]
+             (when-let [expr-type ((some-fn :effective-type :base-type) opts)]
+               (isa? expr-type :type/Temporal))))))
 
-(defn- optimizable-field? [field]
-  (mbql.u/match-one field
-    [:field _ (_ :guard (comp optimizable-units :temporal-unit))]))
+(defn- optimizable-expr? [expr]
+  (lib.util.match/match-lite expr
+    [#{:field :expression} & _]
+    (and (temporal-ref? &match)
+         (let [unit (or (lib/raw-temporal-bucket &match) :default)]
+           (or (= unit :default)
+               (contains? optimizable-units unit))))))
 
 (defmulti ^:private can-optimize-filter?
-  mbql.u/dispatch-by-clause-name-or-class)
+  {:arglists '([mbql-clause])}
+  lib/dispatch-value)
 
 (defn- optimizable-temporal-value?
   "Can `temporal-value` clause can be optimized?"
   [temporal-value]
-  (mbql.u/match-one temporal-value
-    [:relative-datetime (_ :guard #{0 :current})]
+  (lib.util.match/match-lite temporal-value
+    [:relative-datetime _opts #{0 :current}]
     true
 
-    [(_ :guard #{:absolute-datetime :relative-datetime}) _ (unit :guard optimizable-units)]
-    true))
+    [(_tag :guard #{:absolute-datetime :relative-datetime}) _opts _n _unit]
+    (let [unit (or (lib/raw-temporal-bucket &match) :default)]
+      (or (= unit :default)
+          (contains? optimizable-units unit)))))
 
 (defn- field-and-temporal-value-have-compatible-units?
   "Do datetime `field` clause and `temporal-value` clause have 'compatible' units that mean we'll be able to optimize
   the filter clause they're in?"
   [field temporal-value]
-  (mbql.u/match-one temporal-value
-    [:relative-datetime (_ :guard #{0 :current})]
+  (lib.util.match/match-lite temporal-value
+    [:relative-datetime _opts #{0 :current}]
     true
 
-    [(_ :guard #{:absolute-datetime :relative-datetime}) _ (unit :guard optimizable-units)]
-    (= (temporal-unit field) unit)))
+    [#{:absolute-datetime :relative-datetime} _opts _n _unit]
+    (let [field-unit (or (lib/raw-temporal-bucket field) :default)
+          value-unit (or (lib/raw-temporal-bucket &match) :default)]
+      (cond
+        (= field-unit :default) (contains? optimizable-units value-unit)
+        (= value-unit :default) (contains? optimizable-units field-unit)
+        :else                   (= field-unit value-unit)))))
 
 (defmethod can-optimize-filter? :default
   [filter-clause]
-  (mbql.u/match-one filter-clause
-    [_
-     (field :guard optimizable-field?)
+  (lib.util.match/match-lite filter-clause
+    [_tag
+     _opts
+     (field :guard optimizable-expr?)
+     (temporal-value :guard optimizable-temporal-value?)]
+    (field-and-temporal-value-have-compatible-units? field temporal-value)))
+
+(defn- not-default-bucket-clause?
+  [clause]
+  (and (vector? clause)
+       (not= :default (get-in clause [2 :temporal-unit]))))
+
+;; TODO: I believe we do not generate __filter clauses that have default temporal bucket on column arg which should be
+;;       optimized__. Unfortunately I'm not certain about that. If I was, the following `can-optimize-filter? :>=` and
+;;       `can-optimize-filter? :>=` definitions would be redundant after update of `optimizable-expr?`, ie. changing
+;;       the logic to something along "if `expr` has default temporal unit we should not optimize".
+
+(defmethod can-optimize-filter? :>=
+  [filter-clause]
+  (lib.util.match/match-lite
+    filter-clause
+    [_tag
+     _opts
+     ;; Don't optimize >= with column that has default temporal bucket
+     (field :guard (and (not-default-bucket-clause? field) (optimizable-expr? field)))
+     (temporal-value :guard optimizable-temporal-value?)]
+    (field-and-temporal-value-have-compatible-units? field temporal-value)))
+
+(defmethod can-optimize-filter? :<
+  [filter-clause]
+  (lib.util.match/match-lite filter-clause
+    [_tag
+     _opts
+     ;; Don't optimize < with column that has default temporal bucket
+     (field :guard (and (not-default-bucket-clause? field) (optimizable-expr? field)))
      (temporal-value :guard optimizable-temporal-value?)]
     (field-and-temporal-value-have-compatible-units? field temporal-value)))
 
 (defmethod can-optimize-filter? :between
   [filter-clause]
-  (mbql.u/match-one filter-clause
-    [_
-     (field :guard optimizable-field?)
+  (lib.util.match/match-lite filter-clause
+    [:between
+     _opts
+     [(_offset :guard #{:+ :-})
+      _plus_minus_opts
+      (:and [#{:field :expression} & _]
+            (field :guard optimizable-expr?))
+      [:interval _interval_opts _n _unit]]
+     (temporal-value-1 :guard optimizable-temporal-value?)
+     (temporal-value-2 :guard optimizable-temporal-value?)]
+    (and (field-and-temporal-value-have-compatible-units? field temporal-value-1)
+         (field-and-temporal-value-have-compatible-units? field temporal-value-2))
+
+    [:between
+     _opts
+     (:and [#{:field :expression} & _]
+           (field :guard optimizable-expr?))
      (temporal-value-1 :guard optimizable-temporal-value?)
      (temporal-value-2 :guard optimizable-temporal-value?)]
     (and (field-and-temporal-value-have-compatible-units? field temporal-value-1)
          (field-and-temporal-value-have-compatible-units? field temporal-value-2))))
 
-(s/defn ^:private temporal-literal-lower-bound [unit t :- java.time.temporal.Temporal]
+(mr/def ::temporal
+  (lib.schema.common/instance-of-class java.time.temporal.Temporal))
+
+(mu/defn- temporal-literal-lower-bound :- ::temporal
+  [unit :- (into [:enum] u.date/add-units)
+   t    :- ::temporal]
   (:start (u.date/range t unit)))
 
-(s/defn ^:private temporal-literal-upper-bound [unit t :- java.time.temporal.Temporal]
+(mu/defn- temporal-literal-upper-bound :- ::temporal
+  [unit :- (into [:enum] u.date/add-units)
+   t    :- ::temporal]
   (:end (u.date/range t unit)))
 
 (defn- change-temporal-unit-to-default [field]
-  (mbql.u/update-field-options field assoc :temporal-unit :default))
+  (lib.util.match/replace-lite field
+    [#{:field :expression} {:temporal-unit (_ :guard optimizable-units)} _id-or-name]
+    (lib/update-options &match assoc :temporal-unit :default)
+
+    [:absolute-datetime _opts t _unit]
+    [:absolute-datetime _opts t :default]))
 
 (defmulti ^:private temporal-value-lower-bound
   "Get a clause representing the *lower* bound that should be used when converting a `temporal-value-clause` (e.g.
   `:absolute-datetime` or `:relative-datetime`) to an optimized range."
   {:arglists '([temporal-value-clause temporal-unit])}
-  mbql.u/dispatch-by-clause-name-or-class)
+  (fn [temporal-value-clause _temporal-unit]
+    (lib/dispatch-value temporal-value-clause)))
 
 (defmulti ^:private temporal-value-upper-bound
   "Get a clause representing the *upper* bound that should be used when converting a `temporal-value-clause` (e.g.
   `:absolute-datetime` or `:relative-datetime`) to an optimized range."
   {:arglists '([temporal-value-clause temporal-unit])}
-  mbql.u/dispatch-by-clause-name-or-class)
+  (fn [temporal-value-clause _temporal-unit]
+    (lib/dispatch-value temporal-value-clause)))
 
-(defmethod temporal-value-lower-bound :absolute-datetime
-  [[_ t unit] _]
-  [:absolute-datetime (temporal-literal-lower-bound unit t) :default])
+(defmethod temporal-value-lower-bound :default
+  [_temporal-value-clause _temporal-unit]
+  nil)
 
-(defmethod temporal-value-upper-bound :absolute-datetime
-  [[_ t unit] _]
-  [:absolute-datetime (temporal-literal-upper-bound unit t) :default])
+(defmethod temporal-value-upper-bound :default
+  [_temporal-value-clause _temporal-unit]
+  nil)
 
-(defmethod temporal-value-lower-bound :relative-datetime
-  [[_ n unit] temporal-unit]
-  [:relative-datetime (if (= n :current) 0 n) (or unit temporal-unit)])
+(mr/def ::date-add-unit
+  (into [:enum] u.date/add-units))
 
-(defmethod temporal-value-upper-bound :relative-datetime
-  [[_ n unit] temporal-unit]
-  [:relative-datetime (inc (if (= n :current) 0 n)) (or unit temporal-unit)])
+(mu/defn- target-unit-for-new-bound :- [:maybe ::date-add-unit]
+  [value-unit :- [:maybe :keyword]
+   field-unit :- [:maybe :keyword]]
+  (or (when (and value-unit
+                 (not= value-unit :default))
+        value-unit)
+      (when (and field-unit
+                 (not= field-unit :default))
+        field-unit)))
+
+(mu/defmethod temporal-value-lower-bound :absolute-datetime :- :mbql.clause/absolute-datetime
+  [[_tag _opts t unit] temporal-unit]
+  (let [target-unit (target-unit-for-new-bound unit temporal-unit)]
+    (lib/absolute-datetime (temporal-literal-lower-bound target-unit t) :default)))
+
+(mu/defmethod temporal-value-upper-bound :absolute-datetime :- :mbql.clause/absolute-datetime
+  [[_tag _opts t unit] temporal-unit]
+  (let [target-unit (target-unit-for-new-bound unit temporal-unit)]
+    (lib/absolute-datetime (temporal-literal-upper-bound target-unit t) :default)))
+
+(mu/defmethod temporal-value-lower-bound :relative-datetime :- [:maybe :mbql.clause/relative-datetime]
+  [[_tag _opts n unit] temporal-unit]
+  (when-not (= temporal-unit :default)
+    (let [target-unit (target-unit-for-new-bound unit temporal-unit)]
+      (lib/relative-datetime (if (= n :current) 0 n) target-unit))))
+
+(mu/defmethod temporal-value-upper-bound :relative-datetime :- [:maybe :mbql.clause/relative-datetime]
+  [[_tag _opts n unit] temporal-unit]
+  (when-not (= temporal-unit :default)
+    (let [target-unit (target-unit-for-new-bound unit temporal-unit)]
+      (lib/relative-datetime (inc (if (= n :current) 0 n)) target-unit))))
+
+(mu/defn- date-field-with-day-bucketing?
+  [query path expr :- [:maybe ::lib.schema.expression/expression]]
+  (and (isa? (lib.walk/apply-f-for-stage-at-path lib/type-of query path expr) :type/Date)
+       (= (lib/raw-temporal-bucket expr) :day)))
 
 (defmulti ^:private optimize-filter
-  "Optimize a filter clause against a temporal-bucketed `:field` clause and `:absolute-datetime` or `:relative-datetime`
-  value by converting to an unbucketed range."
-  {:arglists '([clause])}
-  mbql.u/dispatch-by-clause-name-or-class)
+  "Optimize a filter clause against a temporal-bucketed `:field` or `:expression` clause and `:absolute-datetime` or
+  `:relative-datetime`value by converting to an unbucketed range."
+  {:arglists '([query path clause])}
+  (fn [_query _path clause]
+    (lib/dispatch-value clause)))
 
 (defmethod optimize-filter :=
-  [[_ field temporal-value]]
-  (let [temporal-unit (mbql.u/match-one field [:field _ (opts :guard :temporal-unit)] (:temporal-unit opts))]
-    (when (field-and-temporal-value-have-compatible-units? field temporal-value)
-      (let [field' (change-temporal-unit-to-default field)]
-        [:and
-         [:>= field' (temporal-value-lower-bound temporal-value temporal-unit)]
-         [:< field'  (temporal-value-upper-bound temporal-value temporal-unit)]]))))
+  [query path [_tag _opts field temporal-value]]
+  (if (date-field-with-day-bucketing? query path field)
+    (lib/= (change-temporal-unit-to-default field) (change-temporal-unit-to-default temporal-value))
+    (let [temporal-unit (lib/raw-temporal-bucket field)]
+      (when (field-and-temporal-value-have-compatible-units? field temporal-value)
+        (when-let [lower-bound (temporal-value-lower-bound temporal-value temporal-unit)]
+          (when-let [upper-bound (temporal-value-upper-bound temporal-value temporal-unit)]
+            (let [field' (change-temporal-unit-to-default field)]
+              (lib/and
+               (lib/>= field' lower-bound)
+               (lib/< (lib/fresh-uuids field') upper-bound)))))))))
 
 (defmethod optimize-filter :!=
-  [filter-clause]
-  (mbql.u/negate-filter-clause ((get-method optimize-filter :=) filter-clause)))
+  [query path [_tag _opts field temporal-value :as filter-clause]]
+  (if (date-field-with-day-bucketing? query path field)
+    (lib/!= (change-temporal-unit-to-default field) (change-temporal-unit-to-default temporal-value))
+    (when-let [optimized ((get-method optimize-filter :=) query path filter-clause)]
+      (lib/negate-boolean-expression optimized))))
 
-(defn- optimize-comparison-filter
-  [optimize-temporal-value-fn [filter-type field temporal-value] new-filter-type]
-  [new-filter-type
-   (change-temporal-unit-to-default field)
-   (optimize-temporal-value-fn temporal-value (temporal-unit field))])
+(mu/defn- optimize-comparison-filter :- [:maybe ::lib.schema.mbql-clause/clause]
+  [query path optimize-temporal-value-fn [tag opts field temporal-value] new-filter-type :- [:enum :< :>=]]
+  (b/cond
+    (date-field-with-day-bucketing? query path field)
+    [tag opts (change-temporal-unit-to-default field) (change-temporal-unit-to-default temporal-value)]
+
+    :let [new-bound (optimize-temporal-value-fn temporal-value (lib/raw-temporal-bucket field))]
+    new-bound
+    ((case new-filter-type
+       :<  lib/<
+       :>= lib/>=)
+     (change-temporal-unit-to-default field)
+     new-bound)
+
+    :else
+    (log/errorf "optimize-temporal-value-fn %s did not return a new bound" optimize-temporal-value-fn)))
 
 (defmethod optimize-filter :<
-  [filter-clause]
-  (optimize-comparison-filter temporal-value-lower-bound filter-clause :<))
+  [query path filter-clause]
+  (optimize-comparison-filter query path #'temporal-value-lower-bound filter-clause :<))
 
 (defmethod optimize-filter :<=
-  [filter-clause]
-  (optimize-comparison-filter temporal-value-upper-bound filter-clause :<))
+  [query path filter-clause]
+  (optimize-comparison-filter query path #'temporal-value-upper-bound filter-clause :<))
 
 (defmethod optimize-filter :>
-  [filter-clause]
-  (optimize-comparison-filter temporal-value-upper-bound filter-clause :>=))
+  [query path filter-clause]
+  (optimize-comparison-filter query path #'temporal-value-upper-bound filter-clause :>=))
 
 (defmethod optimize-filter :>=
-  [filter-clause]
-  (optimize-comparison-filter temporal-value-lower-bound filter-clause :>=))
+  [query path filter-clause]
+  (optimize-comparison-filter query path #'temporal-value-lower-bound filter-clause :>=))
 
 (defmethod optimize-filter :between
-  [[_ field lower-bound upper-bound]]
-  (let [field' (change-temporal-unit-to-default field)]
-    [:and
-     [:>= field' (temporal-value-lower-bound lower-bound (temporal-unit field))]
-     [:<  field' (temporal-value-upper-bound upper-bound (temporal-unit field))]]))
+  [query path [_tag _opts field lower-bound upper-bound]]
+  (if (date-field-with-day-bucketing? query path field)
+    (lib/between
+     (change-temporal-unit-to-default field)
+     (change-temporal-unit-to-default lower-bound)
+     (change-temporal-unit-to-default upper-bound))
+    (when-let [new-lower-bound (temporal-value-lower-bound lower-bound (lib/raw-temporal-bucket field))]
+      (when-let [new-upper-bound (temporal-value-upper-bound upper-bound (lib/raw-temporal-bucket field))]
+        (let [field' (change-temporal-unit-to-default field)]
+          (lib/and
+           (lib/>= field' new-lower-bound)
+           (lib/<  (lib/fresh-uuids field') new-upper-bound)))))))
 
-(defn- optimize-temporal-filters* [query]
-  (mbql.u/replace query
-    (_ :guard (partial mbql.u/is-clause? (set (keys (methods optimize-filter)))))
-    (or (when (can-optimize-filter? &match)
-          (u/prog1 (optimize-filter &match)
+(def ^:private optimizable-filter-types
+  (set (keys (methods optimize-filter))))
+
+(defn- optimize-temporal-filters* [query path clause]
+  (when (lib/clause-of-type? clause optimizable-filter-types)
+    (or (when (can-optimize-filter? clause)
+          (u/prog1 (optimize-filter query path clause)
             (if <>
-              (when-not (= &match <>)
-                (log/tracef "Optimized filter %s to %s" (pr-str &match) (pr-str <>)))
+              (when-not (= clause <>)
+                (log/tracef "Optimized filter %s to %s" (pr-str clause) (pr-str <>)))
               ;; if for some reason `optimize-filter` doesn't return an optimized filter clause, log and error and use
               ;; the original. `can-optimize-filter?` shouldn't have said we could optimize this filter in the first
               ;; place
-              (log/error (trs "Error optimizing temporal filter clause") (pr-str &match)))))
-        &match)))
+              (log/error "Error optimizing temporal filter clause: optimize-filter unexpectedly returned nil" (pr-str clause)))))
+        clause)))
 
-(defn- optimize-temporal-filters-all-levels [{query-type :type, :as query}]
-  (if (not= query-type :query)
-    query
-    ;; walk query, looking for inner-query forms that have a `:filter` key
-    (walk/postwalk
-     (fn [form]
-       (if-not (and (map? form) (seq (:filter form)))
-         form
-         ;; optimize the filters in this inner-query form.
-         (let [optimized (optimize-temporal-filters* form)]
-           ;; if we did some optimizations, we should flatten/deduplicate the filter clauses afterwards.
-           (cond-> optimized
-             (not= optimized form) (update :filter mbql.u/combine-filter-clauses)))))
-     query)))
-
-(defn optimize-temporal-filters
-  "Middlware that optimizes equality (`=` and `!=`) and comparison (`<`, `between`, etc.) filter clauses against
+(mu/defn optimize-temporal-filters :- ::lib.schema/query
+  "Middleware that optimizes equality (`=` and `!=`) and comparison (`<`, `between`, etc.) filter clauses against
   bucketed datetime fields. Rewrites those filter clauses as logically equivalent filter clauses that do not use
   bucketing (i.e., their datetime unit is `:default`, meaning no bucketing functions need be applied).
 
@@ -199,6 +329,15 @@
 
   This namespace expects to run *after* the `wrap-value-literals` middleware, meaning datetime literal strings like
   `\"2019-09-24\"` should already have been converted to `:absolute-datetime` clauses."
-  [qp]
-  (fn [query rff context]
-    (qp (optimize-temporal-filters-all-levels query) rff context)))
+  [query :- ::lib.schema/query]
+  (lib.walk/walk-stages
+   query
+   (fn [query path stage]
+     (when (seq (:filters stage))
+       (letfn [(update-filters [filters]
+                 (let [filters' (lib.walk/walk-clauses* filters #(optimize-temporal-filters* query path %))]
+                   (if (= filters' filters)
+                     filters
+                     ;; if we did some optimizations, we should flatten/deduplicate the filter clauses afterwards.
+                     (lib/simplify-filters filters'))))]
+         (update stage :filters update-filters))))))
