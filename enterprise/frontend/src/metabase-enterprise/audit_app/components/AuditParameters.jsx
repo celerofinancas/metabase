@@ -1,10 +1,8 @@
-import React from "react";
 import PropTypes from "prop-types";
-
-import Button from "metabase/core/components/Button";
-
+import { Component } from "react";
 import _ from "underscore";
-import { AuditParametersInput } from "./AuditParameters.styled";
+
+import { Box, Button, Group, Input, ScrollArea } from "metabase/ui";
 
 const DEBOUNCE_PERIOD = 300;
 
@@ -26,7 +24,8 @@ const propTypes = {
   hasResults: PropTypes.bool,
 };
 
-export default class AuditParameters extends React.Component {
+// eslint-disable-next-line import/no-default-export -- deprecated usage
+export default class AuditParameters extends Component {
   constructor(props) {
     super(props);
     this.state = {
@@ -55,38 +54,39 @@ export default class AuditParameters extends React.Component {
     const isEmpty =
       hasResults === false &&
       inputValues &&
-      Object.values(inputValues).every(v => v === "");
+      Object.values(inputValues).every((v) => v === "");
 
     return (
-      <div>
-        <div className="pt4">
-          {parameters.map(({ key, placeholder, icon, disabled }) => (
-            <AuditParametersInput
-              key={key}
-              type="text"
-              value={inputValues[key] || ""}
-              placeholder={placeholder}
-              disabled={isEmpty || disabled}
-              onChange={value => {
-                this.changeValue(key, value);
-              }}
-              icon={icon}
-            />
-          ))}
-          {buttons?.map(({ key, label, disabled, onClick }) => (
-            <Button
-              className="ml2"
-              key={key}
-              primary
-              disabled={isEmpty || disabled}
-              onClick={onClick}
-            >
-              {label}
-            </Button>
-          ))}
+      <Box>
+        <div>
+          <Group grow>
+            {parameters.map(({ key, placeholder, icon, disabled }) => (
+              <Input
+                key={key}
+                type="text"
+                value={inputValues[key] || ""}
+                placeholder={placeholder}
+                disabled={isEmpty || disabled}
+                onChange={(e) => {
+                  this.changeValue(key, e.target.value);
+                }}
+                icon={icon}
+              />
+            ))}
+            {buttons?.map(({ key, label, disabled, onClick }) => (
+              <Button
+                key={key}
+                variant="filled"
+                disabled={isEmpty || disabled}
+                onClick={onClick}
+              >
+                {label}
+              </Button>
+            ))}
+          </Group>
         </div>
-        {children && children(committedValues)}
-      </div>
+        <ScrollArea>{children && children(committedValues)}</ScrollArea>
+      </Box>
     );
   }
 }

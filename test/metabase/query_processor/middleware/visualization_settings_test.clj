@@ -1,19 +1,22 @@
 (ns metabase.query-processor.middleware.visualization-settings-test
   "Tests for visualization settings processing"
-  (:require [clojure.test :refer :all]
-            [metabase.models :refer [Card Field]]
-            [metabase.query-processor.middleware.visualization-settings :as viz-settings]
-            [metabase.shared.models.visualization-settings :as mb.viz]
-            [metabase.test :as mt]))
+  (:require
+   [clojure.test :refer :all]
+   [metabase.lib.core :as lib]
+   [metabase.lib.test-metadata :as meta]
+   [metabase.lib.test-util :as lib.tu]
+   [metabase.models.visualization-settings :as mb.viz]
+   [metabase.query-processor.middleware.visualization-settings :as viz-settings]
+   [metabase.test :as mt]
+   [metabase.util :as u]))
 
 (defn- update-viz-settings
   ([query] (update-viz-settings query true))
   ([query remove-global?]
-   (mt/with-everything-store
-     (cond-> (-> (mt/test-qp-middleware viz-settings/update-viz-settings query)
-                 :metadata
-                 :data
-                 :viz-settings)
+   (let [mp    (or (:lib/metadata query)
+                   meta/metadata-provider)
+         query (lib/query mp query)]
+     (cond-> (:viz-settings ((viz-settings/update-viz-settings query identity) {}))
        remove-global?
        (dissoc ::mb.viz/global-column-settings)))))
 
@@ -60,54 +63,87 @@
    (test-query field-ids card-id viz-settings :query))
 
   ([field-ids card-id viz-settings query-type]
-   (let [query {:type query-type
-                :query {:fields (into [] (map #(vector :field % nil) field-ids))}
-                :middleware {:process-viz-settings? true}}
+   (let [query  (merge
+                 {:type       query-type
+                  :middleware {:process-viz-settings? true}}
+                 (if (= query-type :native)
+                   {:native {:query "SELECT X"}}
+                   {:query (-> {:source-table 1}
+                               (u/assoc-dissoc :fields (not-empty (into [] (map #(vector :field % nil) field-ids)))))}))
          query' (if card-id
                   (assoc-in query [:info :card-id] card-id)
                   query)]
      (if viz-settings (assoc query' :viz-settings viz-settings) query'))))
 
-(deftest card-viz-settings-test
-  (mt/with-everything-store
-    (mt/with-temp* [Field [{field-id-1 :id}]
-                    Field [{field-id-2 :id}]]
-      (testing "Viz settings for a saved card are fetched from the DB and normalized"
-        (mt/with-temp Card [{card-id :id} {:visualization_settings (db-viz-settings field-id-1 field-id-2)}]
-          (let [query    (test-query [field-id-1 field-id-2] card-id nil)
-                result   (update-viz-settings query)
-                expected (processed-viz-settings field-id-1 field-id-2)]
-            (is (= expected result)))))
+(def ^:private card-viz-settings-test-mock-metadata-provider
+  (lib.tu/mock-metadata-provider
+   meta/metadata-provider
+   {:fields (for [field [{:id 1, :settings {:column_title "Test"}}
+                         {:id 2, :settings {:decimals 4, :scale 10}}
+                         {:id 3, :settings {:number_style "percent"}}]]
+              (merge (meta/field-metadata :venues :name) field))}))
 
-      (testing "Viz settings for an unsaved card are fetched from the query map"
-        (let [viz-settings (into {} (processed-viz-settings field-id-1 field-id-2))
-              query        (test-query [field-id-1 field-id-2] nil viz-settings)
-              result       (update-viz-settings query)
-              expected     (processed-viz-settings field-id-1 field-id-2)]
-          (is (= expected result)))))
-
-    (mt/with-temp* [Field [{field-id-1 :id} {:settings {:column_title "Test"}}]
-                    Field [{field-id-2 :id} {:settings {:decimals 4, :scale 10}}]
-                    Field [{field-id-3 :id} {:settings {:number_style "percent"}}]]
-      (testing "Field settings in the DB are incorporated into visualization settings with a lower
+(deftest ^:parallel card-viz-settings-test
+  (testing "Field settings in the DB are incorporated into visualization settings with a lower
                precedence than card settings"
-        (testing "for a saved card"
-          (mt/with-temp Card [{card-id :id} {:visualization_settings (db-viz-settings field-id-1 field-id-2)}]
-            (let [query    (test-query [field-id-1 field-id-2 field-id-3] card-id nil)
-                  result   (update-viz-settings query)
-                  expected (-> (processed-viz-settings field-id-1 field-id-2)
-                               (assoc-in [::mb.viz/column-settings {::mb.viz/field-id field-id-2} ::mb.viz/scale] 10)
-                               (assoc-in [::mb.viz/column-settings {::mb.viz/field-id field-id-3} ::mb.viz/number-style] "percent"))]
-              (is (= expected result)))))
+    (testing "for a saved card"
+      (let [mp       (lib.tu/mock-metadata-provider
+                      card-viz-settings-test-mock-metadata-provider
+                      {:cards [{:id                     1
+                                :database-id            1
+                                :dataset-query          {:database 1, :type :native, :native {:query "X"}}
+                                :visualization-settings (db-viz-settings 1 2)}]})
+            query    (lib/query mp (test-query [1 2 3] 1 nil))
+            result   (update-viz-settings query)
+            expected (-> (processed-viz-settings 1 2)
+                         (assoc-in [::mb.viz/column-settings {::mb.viz/field-id 2} ::mb.viz/scale] 10)
+                         (assoc-in [::mb.viz/column-settings {::mb.viz/field-id 3} ::mb.viz/number-style] "percent"))]
+        (is (= expected result))))))
 
-        (testing "for an unsaved card"
-          (let [viz-settings (into {} (processed-viz-settings field-id-1 field-id-2))
-                query        (test-query [field-id-1 field-id-2 field-id-3] nil viz-settings)
-                result       (update-viz-settings query)
-                expected     (-> (processed-viz-settings field-id-1 field-id-2)
-                                 (assoc-in [::mb.viz/column-settings {::mb.viz/field-id field-id-2} ::mb.viz/scale] 10)
-                                 (assoc-in [::mb.viz/column-settings {::mb.viz/field-id field-id-3} ::mb.viz/number-style] "percent"))]
-            (is (= expected result))))))))
+(deftest ^:parallel card-viz-settings-test-2
+  (testing "Field settings in the DB are incorporated into visualization settings with a lower
+               precedence than card settings"
+    (testing "for an unsaved card"
+      (let [viz-settings (into {} (processed-viz-settings 1 2))
+            query        (lib/query
+                          card-viz-settings-test-mock-metadata-provider
+                          (test-query [1 2 3] nil viz-settings))
+            result       (update-viz-settings query)
+            expected     (-> (processed-viz-settings 1 2)
+                             (assoc-in [::mb.viz/column-settings {::mb.viz/field-id 2} ::mb.viz/scale] 10)
+                             (assoc-in [::mb.viz/column-settings {::mb.viz/field-id 3} ::mb.viz/number-style] "percent"))]
+        (is (= expected result))))))
+
+(deftest ^:parallel card-viz-settings-test-3
+  (testing "Field settings in the DB are incorporated into visualization settings with a lower
+               precedence than card settings"
+    (testing "for a saved card"
+      (let [mp       (lib.tu/mock-metadata-provider
+                      card-viz-settings-test-mock-metadata-provider
+                      {:cards [{:id                     1
+                                :datset-query           {:database 1, :type :native, :native {:query "X"}}
+                                :database-id            1
+                                :visualization-settings (db-viz-settings 1 2)}]})
+            query    (lib/query mp (test-query [1 2 3] 1 nil))
+            result   (update-viz-settings query)
+            expected (-> (processed-viz-settings 1 2)
+                         (assoc-in [::mb.viz/column-settings {::mb.viz/field-id 2} ::mb.viz/scale] 10)
+                         (assoc-in [::mb.viz/column-settings {::mb.viz/field-id 3} ::mb.viz/number-style] "percent"))]
+        (is (= expected result))))))
+
+(deftest ^:parallel card-viz-settings-test-4
+  (testing "Field settings in the DB are incorporated into visualization settings with a lower
+               precedence than card settings"
+    (testing "for an unsaved card"
+      (let [viz-settings (into {} (processed-viz-settings 1 2))
+            query        (lib/query
+                          card-viz-settings-test-mock-metadata-provider
+                          (test-query [1 2 3] nil viz-settings))
+            result       (update-viz-settings query)
+            expected     (-> (processed-viz-settings 1 2)
+                             (assoc-in [::mb.viz/column-settings {::mb.viz/field-id 2} ::mb.viz/scale] 10)
+                             (assoc-in [::mb.viz/column-settings {::mb.viz/field-id 3} ::mb.viz/number-style] "percent"))]
+        (is (= expected result))))))
 
 (def ^:private test-native-query-viz-settings
   {::mb.viz/column-settings
@@ -115,20 +151,29 @@
     {::mb.viz/column-name "TAX"} {::mb.viz/column-title "Tax" ::mb.viz/number-style "currency"},
     {::mb.viz/column-name "SUBTOTAL"} {::mb.viz/column-title "Subtotal" ::mb.viz/number-style "currency" ::mb.viz/decimals 2}}})
 
-(deftest native-query-viz-settings-test
+(deftest ^:parallel native-query-viz-settings-test
   (testing "Viz settings for native queries are pulled out of the query map but not modified"
     (let [query  (test-query [] nil test-native-query-viz-settings :native)
           result (update-viz-settings query)]
       (is (= test-native-query-viz-settings result)))))
 
-(deftest includes-global-settings
-  (testing "Viz settings include global viz settings"
-    (mt/with-temp* [Field [{field-id-1 :id}]
-                    Field [{field-id-2 :id}]]
-      (let [query    (test-query [field-id-1 field-id-2] nil nil)
-            result   (update-viz-settings query false)
-            expected (assoc (processed-viz-settings field-id-1 field-id-2)
-                            ::mb.viz/global-column-settings
-                            #:type{:Number {::mb.viz/number_separators ".,"}
-                                   :Currency {::mb.viz/currency "BIF"
-                                              ::mb.viz/currency_style "code"}})]))))
+(deftest includes-global-settings-test
+  (testing "Viz settings include global viz settings, in a normalized form"
+    (let [mp                  (lib.tu/mock-metadata-provider
+                               meta/metadata-provider
+                               {:fields (for [field [{:id 1}
+                                                     {:id 2}]]
+                                          (merge (meta/field-metadata :venues :id) field))
+                                :cards  [{:id                     1
+                                          :database-id            1
+                                          :dataset-query          {:database 1, :type :native, :native {:query "X"}}
+                                          :visualization_settings (db-viz-settings 1 2)}]})
+          global-viz-settings #:type{:Number   {:number_separators ".,"}
+                                     :Currency {:currency "BIF"}}]
+      (mt/with-temporary-setting-values [custom-formatting global-viz-settings]
+        (let [query    (lib/query mp (test-query [1 2] 1 nil))
+              result   (update-viz-settings query false)
+              expected (assoc (processed-viz-settings 1 2)
+                              ::mb.viz/global-column-settings #:type{:Number   {::mb.viz/number-separators ".,"}
+                                                                     :Currency {::mb.viz/currency "BIF"}})]
+          (is (= expected result)))))))

@@ -1,4 +1,5 @@
-import React, { ReactNode } from "react";
+import type { ReactNode } from "react";
+
 import DeprecationNotice from "../../containers/DeprecationNotice";
 
 export interface AdminAppProps {
@@ -7,11 +8,12 @@ export interface AdminAppProps {
 
 const AdminApp = ({ children }: AdminAppProps): JSX.Element => {
   return (
-    <div>
+    <>
       <DeprecationNotice />
       {children}
-    </div>
+    </>
   );
 };
 
+// eslint-disable-next-line import/no-default-export -- deprecated usage
 export default AdminApp;

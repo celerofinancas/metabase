@@ -1,14 +1,18 @@
 (ns metabase.server.middleware.ssl
   "Middleware for redirecting users to HTTPS sessions"
-  (:require [clojure.string :as str]
-            [metabase.public-settings :as public-settings]
-            [metabase.server.request.util :as request.u]
-            [ring.util.request :as req]
-            [ring.util.response :as resp]))
+  (:require
+   [clojure.string :as str]
+   [metabase.request.core :as request]
+   [metabase.server.settings :as server.settings]
+   [metabase.system.core :as system]
+   [ring.util.request :as req]
+   [ring.util.response :as response]))
+
+(set! *warn-on-reflection* true)
 
 (def no-redirect-https-uris
   "The set of URLs that should not be forced to redirect to their HTTPS equivalents"
-  #{"/api/health"})
+  #{"/api/health" "/livez" "/readyz"})
 
 (defn- get-request? [{method :request-method}]
   (or (= method :head)
@@ -16,14 +20,14 @@
 
 (defn- https-url [url-string]
   (let [url (java.net.URL. url-string)
-        site-url (java.net.URL. (public-settings/site-url))]
+        site-url (java.net.URL. (system/site-url))]
     (str (java.net.URL. "https" (.getHost site-url) (.getPort site-url) (.getFile url)))))
 
 (defn- ssl-redirect-response
   "Given a HTTP request, return a redirect response to the equivalent HTTPS URL."
   [request]
-  (-> (resp/redirect (https-url (req/request-url request)))
-      (resp/status   (if (get-request? request) 301 307))))
+  (-> (response/redirect (https-url (req/request-url request)))
+      (response/status   (if (get-request? request) 301 307))))
 
 (defn redirect-to-https-middleware
   "Redirect users to HTTPS sessions when certain conditions are met.
@@ -31,18 +35,18 @@
   [handler]
   (fn [request respond raise]
     (cond
-      (str/blank? (public-settings/site-url))
+      (str/blank? (system/site-url))
       (handler request respond raise)
 
-      (not (str/starts-with? (public-settings/site-url) "https:"))
+      (not (str/starts-with? (system/site-url) "https:"))
       (handler request respond raise)
 
       (no-redirect-https-uris (:uri request))
       (handler request respond raise)
 
       (and
-       (public-settings/redirect-all-requests-to-https)
-       (not (request.u/https? request)))
+       (server.settings/redirect-all-requests-to-https)
+       (not (request/https? request)))
       (respond (ssl-redirect-response request))
 
       :else (handler request respond raise))))

@@ -1,11 +1,12 @@
 /* eslint-disable react/prop-types */
-import React, { Component } from "react";
-
-import { isSameSeries } from "metabase/visualizations/lib/utils";
-import d3 from "d3";
 import cx from "classnames";
+import * as d3 from "d3";
+import { Component } from "react";
 
-const LegacyChoropleth = ({
+import CS from "metabase/css/core/index.css";
+import { isSameSeries } from "metabase/visualizations/lib/utils";
+
+export const LegacyChoropleth = ({
   series,
   geoJson,
   projection,
@@ -14,14 +15,24 @@ const LegacyChoropleth = ({
   onHoverFeature,
   onClickFeature,
 }) => {
-  const geo = d3.geo.path().projection(projection);
+  const geo = d3.geoPath().projection(projection);
 
   const [[minX, minY], [maxX, maxY]] = projectionFrame.map(projection);
   const width = maxX - minX;
   const height = maxY - minY;
 
   return (
-    <div className="absolute top bottom left right flex layout-centered">
+    <div
+      className={cx(
+        CS.absolute,
+        CS.top,
+        CS.bottom,
+        CS.left,
+        CS.right,
+        CS.flex,
+        CS.layoutCentered,
+      )}
+    >
       <ShouldUpdate
         series={series}
         shouldUpdate={(props, nextProps) =>
@@ -29,33 +40,34 @@ const LegacyChoropleth = ({
         }
       >
         {() => (
-          // eslint-disable-line react/display-name
           <svg
-            className="flex-full m1"
+            className={cx(CS.flexFull, CS.m1)}
             viewBox={`${minX} ${minY} ${width} ${height}`}
           >
             {geoJson.features.map((feature, index) => (
               <path
+                data-testid="choropleth-feature"
                 key={index}
                 d={geo(feature, index)}
                 stroke="white"
                 strokeWidth={1}
                 fill={getColor(feature)}
-                onMouseMove={e =>
+                onMouseMove={(e) =>
                   onHoverFeature({
                     feature: feature,
                     event: e.nativeEvent,
                   })
                 }
                 onMouseLeave={() => onHoverFeature(null)}
-                className={cx({ "cursor-pointer": !!onClickFeature })}
+                className={cx({ [CS.cursorPointer]: !!onClickFeature })}
                 onClick={
-                  onClickFeature &&
-                  (e =>
-                    onClickFeature({
-                      feature: feature,
-                      event: e.nativeEvent,
-                    }))
+                  onClickFeature
+                    ? (e) =>
+                        onClickFeature({
+                          feature: feature,
+                          event: e.nativeEvent,
+                        })
+                    : undefined
                 }
               />
             ))}
@@ -82,5 +94,3 @@ class ShouldUpdate extends Component {
     }
   }
 }
-
-export default LegacyChoropleth;

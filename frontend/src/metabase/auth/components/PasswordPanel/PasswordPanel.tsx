@@ -1,34 +1,42 @@
-import React, { useCallback } from "react";
+import { useCallback } from "react";
 import { t } from "ttag";
-import Users from "metabase/entities/users";
-import AuthButton from "../AuthButton";
-import { AuthProvider, LoginData } from "../../types";
-import { ActionListItem, ActionList } from "./PasswordPanel.styled";
 
-export interface PasswordPanelProps {
-  providers?: AuthProvider[];
+import { useDispatch, useSelector } from "metabase/utils/redux";
+
+import { login } from "../../actions";
+import {
+  getExternalAuthProviders,
+  getHasSessionCookies,
+  getIsLdapEnabled,
+} from "../../selectors";
+import type { LoginData } from "../../types";
+import { AuthButton } from "../AuthButton";
+import { LoginForm } from "../LoginForm";
+
+import { ActionList, ActionListItem } from "./PasswordPanel.styled";
+
+interface PasswordPanelProps {
   redirectUrl?: string;
-  onLogin: (data: LoginData, redirectUrl?: string) => void;
 }
 
-const PasswordPanel = ({
-  providers = [],
-  redirectUrl,
-  onLogin,
-}: PasswordPanelProps) => {
+export const PasswordPanel = ({ redirectUrl }: PasswordPanelProps) => {
+  const providers = useSelector(getExternalAuthProviders);
+  const isLdapEnabled = useSelector(getIsLdapEnabled);
+  const hasSessionCookies = useSelector(getHasSessionCookies);
+  const dispatch = useDispatch();
+
   const handleSubmit = useCallback(
     async (data: LoginData) => {
-      await onLogin(data, redirectUrl);
+      await dispatch(login({ data, redirectUrl })).unwrap();
     },
-    [onLogin, redirectUrl],
+    [dispatch, redirectUrl],
   );
 
   return (
     <div>
-      <Users.Form
-        form={Users.forms.login()}
-        submitTitle={t`Sign in`}
-        submitFullWidth
+      <LoginForm
+        isLdapEnabled={isLdapEnabled}
+        hasSessionCookies={hasSessionCookies}
         onSubmit={handleSubmit}
       />
       <ActionList>
@@ -37,7 +45,7 @@ const PasswordPanel = ({
             {t`I seem to have forgotten my password`}
           </AuthButton>
         </ActionListItem>
-        {providers.map(provider => (
+        {providers.map((provider) => (
           <ActionListItem key={provider.name}>
             <provider.Button redirectUrl={redirectUrl} />
           </ActionListItem>
@@ -46,5 +54,3 @@ const PasswordPanel = ({
     </div>
   );
 };
-
-export default PasswordPanel;

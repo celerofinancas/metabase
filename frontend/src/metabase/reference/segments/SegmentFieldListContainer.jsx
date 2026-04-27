@@ -1,28 +1,30 @@
 /* eslint "react/prop-types": "warn" */
-import React, { Component } from "react";
+import cx from "classnames";
 import PropTypes from "prop-types";
-import { connect } from "react-redux";
+import { Component } from "react";
 
-import SegmentSidebar from "./SegmentSidebar";
-import SidebarLayout from "metabase/components/SidebarLayout";
-import SegmentFieldList from "metabase/reference/segments/SegmentFieldList";
-
+import { SidebarLayout } from "metabase/common/components/SidebarLayout";
+import CS from "metabase/css/core/index.css";
 import * as metadataActions from "metabase/redux/metadata";
 import * as actions from "metabase/reference/reference";
+import SegmentFieldList from "metabase/reference/segments/SegmentFieldList";
+import { connect } from "metabase/utils/redux";
 
 import {
-  getUser,
+  getIsEditing,
   getSegment,
   getSegmentId,
-  getDatabaseId,
-  getIsEditing,
+  getTable,
+  getUser,
 } from "../selectors";
+
+import SegmentSidebar from "./SegmentSidebar";
 
 const mapStateToProps = (state, props) => ({
   user: getUser(state, props),
   segment: getSegment(state, props),
   segmentId: getSegmentId(state, props),
-  databaseId: getDatabaseId(state, props),
+  table: getTable(state, props),
   isEditing: getIsEditing(state, props),
 });
 
@@ -31,8 +33,7 @@ const mapDispatchToProps = {
   ...actions,
 };
 
-@connect(mapStateToProps, mapDispatchToProps)
-export default class SegmentFieldListContainer extends Component {
+class SegmentFieldListContainer extends Component {
   static propTypes = {
     params: PropTypes.object.isRequired,
     location: PropTypes.object.isRequired,
@@ -64,7 +65,7 @@ export default class SegmentFieldListContainer extends Component {
 
     return (
       <SidebarLayout
-        className="flex-full relative"
+        className={cx(CS.flexFull, CS.relative)}
         style={isEditing ? { paddingTop: "43px" } : {}}
         sidebar={<SegmentSidebar segment={segment} user={user} />}
       >
@@ -73,3 +74,9 @@ export default class SegmentFieldListContainer extends Component {
     );
   }
 }
+
+// eslint-disable-next-line import/no-default-export -- deprecated usage
+export default connect(
+  mapStateToProps,
+  mapDispatchToProps,
+)(SegmentFieldListContainer);

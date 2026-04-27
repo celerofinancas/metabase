@@ -1,41 +1,33 @@
-import React from "react";
 import { t } from "ttag";
-import { isReducedMotionPreferred } from "metabase/lib/dom";
-import { isSyncAborted, isSyncInProgress } from "metabase/lib/syncing";
-import Tooltip from "metabase/components/Tooltip";
-import { Database, InitialSyncStatus } from "metabase-types/api";
-import {
-  StatusRoot,
-  StatusIconContainer,
-  StatusIcon,
-  StatusContainer,
-  StatusSpinner,
-} from "./DatabaseStatusSmall.styled";
 
-export interface DatabaseStatusSmallProps {
+import { isSyncAborted, isSyncInProgress } from "metabase/utils/syncing";
+import type { Database, InitialSyncStatus } from "metabase-types/api";
+
+import StatusSmall from "../StatusSmall";
+import { getIconName, isSpinnerVisible } from "../utils/status";
+
+export type DatabaseStatusSmallProps = {
   databases: Database[];
   onExpand?: () => void;
-}
+};
 
-const DatabaseStatusSmall = ({
+export const DatabaseStatusSmall = ({
   databases,
   onExpand,
-}: DatabaseStatusSmallProps): JSX.Element => {
+}: DatabaseStatusSmallProps) => {
   const status = getStatus(databases);
   const statusLabel = getStatusLabel(status);
   const hasSpinner = isSpinnerVisible(status);
+  const icon = getIconName(status);
 
   return (
-    <Tooltip tooltip={statusLabel}>
-      <StatusRoot role="status" aria-label={statusLabel} onClick={onExpand}>
-        <StatusContainer status={status}>
-          <StatusIconContainer status={status}>
-            <StatusIcon status={status} name={getIconName(status)} />
-          </StatusIconContainer>
-        </StatusContainer>
-        {hasSpinner && <StatusSpinner size={48} />}
-      </StatusRoot>
-    </Tooltip>
+    <StatusSmall
+      status={status}
+      statusLabel={statusLabel}
+      hasSpinner={hasSpinner}
+      icon={icon}
+      onExpand={onExpand}
+    />
   );
 };
 
@@ -59,25 +51,3 @@ const getStatusLabel = (status: InitialSyncStatus): string => {
       return t`Error syncing`;
   }
 };
-
-const getIconName = (status: InitialSyncStatus): string => {
-  switch (status) {
-    case "incomplete":
-      return "database";
-    case "complete":
-      return "check";
-    case "aborted":
-      return "warning";
-  }
-};
-
-const isSpinnerVisible = (status: InitialSyncStatus): boolean => {
-  switch (status) {
-    case "incomplete":
-      return !isReducedMotionPreferred();
-    default:
-      return false;
-  }
-};
-
-export default DatabaseStatusSmall;

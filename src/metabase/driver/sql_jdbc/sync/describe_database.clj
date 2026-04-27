@@ -1,48 +1,71 @@
 (ns metabase.driver.sql-jdbc.sync.describe-database
   "SQL JDBC impl for `describe-database`."
-  (:require [clojure.java.jdbc :as jdbc]
-            [clojure.string :as str]
-            [clojure.tools.logging :as log]
-            [metabase.driver :as driver]
-            [metabase.driver.sql-jdbc.connection :as sql-jdbc.conn]
-            [metabase.driver.sql-jdbc.execute :as sql-jdbc.execute]
-            [metabase.driver.sql-jdbc.sync.common :as common]
-            [metabase.driver.sql-jdbc.sync.interface :as i]
-            [metabase.driver.sql.query-processor :as sql.qp]
-            [metabase.util.honeysql-extensions :as hx])
-  (:import [java.sql Connection DatabaseMetaData ResultSet]
-           java.util.regex.Pattern))
+  (:refer-clojure :exclude [get-in])
+  (:require
+   [clojure.string :as str]
+   [metabase.driver :as driver]
+   [metabase.driver-api.core :as driver-api]
+   [metabase.driver.sql-jdbc.execute :as sql-jdbc.execute]
+   [metabase.driver.sql-jdbc.sync.common :as sql-jdbc.sync.common]
+   [metabase.driver.sql-jdbc.sync.interface :as sql-jdbc.sync.interface]
+   [metabase.driver.sql.query-processor :as sql.qp]
+   [metabase.driver.sync :as driver.s]
+   [metabase.driver.util :as driver.u]
+   [metabase.util.honey-sql-2 :as h2x]
+   [metabase.util.log :as log]
+   [metabase.util.malli :as mu]
+   [metabase.util.performance :refer [get-in]])
+  (:import
+   (java.sql Connection DatabaseMetaData ResultSet)))
 
-(defmethod i/excluded-schemas :sql-jdbc [_] nil)
+(set! *warn-on-reflection* true)
+
+(defmethod sql-jdbc.sync.interface/excluded-schemas :sql-jdbc [_] nil)
 
 (defn all-schemas
   "Get a *reducible* sequence of all string schema names for the current database from its JDBC database metadata."
   [^DatabaseMetaData metadata]
   {:added "0.39.0", :pre [(instance? DatabaseMetaData metadata)]}
-  (common/reducible-results
+  (sql-jdbc.sync.common/reducible-results
    #(.getSchemas metadata)
    (fn [^ResultSet rs]
      #(.getString rs "TABLE_SCHEM"))))
 
-(defmethod i/syncable-schemas :sql-jdbc
-  [driver _ metadata]
-  (eduction (remove (set (i/excluded-schemas driver)))
+(defn include-schema-logging-exclusion
+  "Wrapper for [[metabase.driver.sync/include-schema?]] which logs an info message in case of exclusion"
+  [schema-inclusion-filters schema-exclusion-filters table-schema]
+  (or (driver.s/include-schema? schema-inclusion-filters schema-exclusion-filters table-schema)
+      (log/infof "Skipping schema '%s' because it does not match the current schema filtering settings" table-schema)))
+
+(defmethod sql-jdbc.sync.interface/filtered-syncable-schemas :sql-jdbc
+  [driver _ metadata schema-inclusion-filters schema-exclusion-filters]
+  (eduction (remove (set (sql-jdbc.sync.interface/excluded-schemas driver)))
+            ;; remove the persisted_model schemas
+            (remove (fn [schema] (re-find #"^metabase_cache.*" schema)))
+            (filter #(include-schema-logging-exclusion schema-inclusion-filters schema-exclusion-filters %))
             (all-schemas metadata)))
 
-(defn simple-select-probe-query
+(mu/defn simple-select-probe-query :- [:cat driver-api/schema.common.non-blank-string [:* :any]]
   "Simple (ie. cheap) SELECT on a given table to test for access and get column metadata. Doesn't return
   anything useful (only used to check whether we can execute a SELECT query)
 
     (simple-select-probe-query :postgres \"public\" \"my_table\")
     ;; -> [\"SELECT TRUE FROM public.my_table WHERE 1 <> 1 LIMIT 0\"]"
-  [driver schema table]
-  {:pre [(string? table)]}
+  [driver :- :keyword
+   schema :- [:maybe :string]        ; I think technically some DBs like SQL Server support empty schema and table names
+   table  :- :string]
   ;; Using our SQL compiler here to get portable LIMIT (e.g. `SELECT TOP n ...` for SQL Server/Oracle)
-  (let [honeysql {:select [[(sql.qp/->honeysql driver true) :_]]
-                  :from   [(sql.qp/->honeysql driver (hx/identifier :table schema table))]
-                  :where  [:not= 1 1]}
+  (let [tru      (sql.qp/->honeysql driver true)
+        table    (sql.qp/->honeysql driver (h2x/identifier :table schema table))
+        honeysql {:select [[tru :_]]
+                  :from   [[table]]
+                  :where  [:inline [:not= 1 1]]}
         honeysql (sql.qp/apply-top-level-clause driver :limit honeysql {:limit 0})]
     (sql.qp/format-honeysql driver honeysql)))
+
+(def ^:dynamic *select-probe-query-timeout-seconds*
+  "time to wait on the select probe query"
+  15)
 
 (defn- execute-select-probe-query
   "Execute the simple SELECT query defined above. The main goal here is to check whether we're able to execute a SELECT
@@ -51,45 +74,176 @@
   every Table on every sync."
   [driver ^Connection conn [sql & params]]
   {:pre [(string? sql)]}
-  (with-open [stmt (common/prepare-statement driver conn sql params)]
+  (with-open [stmt (sql-jdbc.sync.common/prepare-statement driver conn sql params)]
     ;; attempting to execute the SQL statement will throw an Exception if we don't have permissions; otherwise it will
-    ;; truthy wheter or not it returns a ResultSet, but we can ignore that since we have enough info to proceed at
+    ;; truthy whether or not it returns a ResultSet, but we can ignore that since we have enough info to proceed at
     ;; this point.
-    (.execute stmt)))
+    (doto stmt
+      (.setQueryTimeout *select-probe-query-timeout-seconds*)
+      (.execute))))
 
-(defmethod i/have-select-privilege? :sql-jdbc
-  [driver conn table-schema table-name]
+(defn- pr-table [table-schema table-name]
+  (str (when table-schema
+         (str (pr-str table-schema) \.))
+       (pr-str table-name)))
+
+(defmethod sql-jdbc.sync.interface/have-select-privilege? :sql-jdbc
+  [driver ^Connection outer-conn table-schema table-name & {:keys [retry?]}]
   ;; Query completes = we have SELECT privileges
   ;; Query throws some sort of no permissions exception = no SELECT privileges
-  (let [sql-args (simple-select-probe-query driver table-schema table-name)]
-    (log/tracef "Checking for SELECT privileges for %s with query %s"
-                (str (when table-schema
-                       (str (pr-str table-schema) \.))
-                     (pr-str table-name))
+  (let [sql-args (simple-select-probe-query driver table-schema table-name)
+        ;; we must attempt to use a connection local to [[have-select-privilege?]],
+        ;; else if the connection closes, even if we manage to reopen it in this local context
+        ;; outer unrealized resultsets (like the [[all-schemas]] results) may get
+        ;; unrecoverably closed
+        conn (sql-jdbc.execute/try-ensure-open-conn! driver outer-conn :force-context-local? true)]
+    (log/debugf "have-select-privilege? sql-jdbc: Checking for SELECT privileges for %s with query\n%s"
+                (pr-table table-schema table-name)
                 (pr-str sql-args))
     (try
+      (log/debug "have-select-privilege? sql-jdbc: Attempt to execute probe query")
       (execute-select-probe-query driver conn sql-args)
-      (do (log/trace "SELECT privileges confirmed")
-          true)
-      (catch Throwable _
-        (log/trace "No SELECT privileges")
-        false))))
+      (log/infof "%s: SELECT privileges confirmed" (pr-table table-schema table-name))
+      true
+      (catch Throwable e
 
-(defn- db-tables
+        (let [;; Let's try to ensure the connection is not just open but also valid.
+              ;; Snowflake closes the connection but doesn't set it as  closed in the object,
+              ;; so we must explicitly check if it's valid so that subsequent calls to [[sql-jdbc.execute/try-ensure-open-conn!]]
+              ;; will obtain a new connection
+              is-open (sql-jdbc.execute/is-conn-open? conn :check-valid? true)
+
+              allow? (driver/query-canceled? driver e)]
+
+          (if allow?
+            (log/infof "%s: Assuming SELECT privileges: caught timeout exception" (pr-table table-schema table-name))
+            (log/debugf e "%s: Assuming no SELECT privileges: caught exception" (pr-table table-schema table-name)))
+
+          ;; if the connection was closed this will throw an error and fail the sync loop so we prevent this error from
+          ;; affecting anything higher
+          (try (when-not (.getAutoCommit conn)
+                 (.rollback conn))
+               (catch Throwable _))
+          (if (and (not allow?) (not retry?) (not is-open))
+            (sql-jdbc.sync.interface/have-select-privilege? driver conn table-schema table-name :retry? true)
+            allow?))))))
+
+(defn- jdbc-get-tables
+  [driver ^DatabaseMetaData metadata catalog schema-pattern tablename-pattern types]
+  (sql-jdbc.sync.common/reducible-results
+   #(do (log/debugf "jdbc-get-tables: Calling .getTables for catalog `%s`" catalog)
+        (.getTables metadata catalog
+                    (some->> schema-pattern (driver/escape-entity-name-for-metadata driver))
+                    (some->> tablename-pattern (driver/escape-entity-name-for-metadata driver))
+                    (when (seq types) (into-array String types))))
+   (fn [^ResultSet rset]
+     (fn []
+       (let [name (.getString rset "TABLE_NAME")
+             schema (.getString rset "TABLE_SCHEM")
+             ttype (.getString rset "TABLE_TYPE")]
+         (log/debugf "jdbc-get-tables: Fetched object: schema `%s` name `%s` type `%s`" schema name ttype)
+         {:name        name
+          :schema      schema
+          :description (when-let [remarks (.getString rset "REMARKS")]
+                         (when-not (str/blank? remarks)
+                           remarks))
+          :type        ttype})))))
+
+(defn db-tables
   "Fetch a JDBC Metadata ResultSet of tables in the DB, optionally limited to ones belonging to a given
   schema. Returns a reducible sequence of results."
   [driver ^DatabaseMetaData metadata ^String schema-or-nil ^String db-name-or-nil]
-  (common/reducible-results
-   #(.getTables metadata db-name-or-nil (some->> schema-or-nil (driver/escape-entity-name-for-metadata driver)) "%"
-                (into-array String ["TABLE" "PARTITIONED TABLE" "VIEW" "FOREIGN TABLE" "MATERIALIZED VIEW"
-                                    "EXTERNAL TABLE"]))
-   (fn [^ResultSet rs]
-     (fn []
-       {:name        (.getString rs "TABLE_NAME")
-        :schema      (.getString rs "TABLE_SCHEM")
-        :description (when-let [remarks (.getString rs "REMARKS")]
-                       (when-not (str/blank? remarks)
-                         remarks))}))))
+  ;; seems like some JDBC drivers like Snowflake are dumb and still narrow the search results by the current session
+  ;; schema if you pass in `nil` for `schema-or-nil`, which means not to narrow results at all... For Snowflake, I fixed
+  ;; this by passing in `"%"` instead -- consider making this the default behavior. See this Slack thread
+  ;; https://metaboat.slack.com/archives/C04DN5VRQM6/p1706220295862639?thread_ts=1706156558.940489&cid=C04DN5VRQM6 for
+  ;; more info.
+  (jdbc-get-tables driver metadata db-name-or-nil schema-or-nil "%"
+                   ["TABLE" "PARTITIONED TABLE" "VIEW" "FOREIGN TABLE" "MATERIALIZED VIEW"
+                    "EXTERNAL TABLE" "DYNAMIC_TABLE"]))
+
+(defn- build-privilege-map
+  "Build a nested map of schema -> table -> set of permissions from current user table privileges.
+  There are 2 permissions:
+  - :select - self-explained
+  - :write - must have insert, update, and delete permissions. used for table data editing"
+  [driver conn]
+  (->> (sql-jdbc.sync.interface/current-user-table-privileges driver {:connection conn})
+       (reduce (fn [acc {:keys [schema table select insert update delete]}]
+                 (assoc-in acc [schema table]
+                           (cond-> #{}
+                             select (conj :select)
+                             (and insert update delete) (conj :write))))
+               {})))
+
+(defn- privilege-fn-from-map
+  "Given a privilege map (schema -> table -> #{:select :write}), return a privilege-checking function.
+   Falls back to N+1 probe for Postgres FOREIGN TABLEs which aren't covered by current-user-table-privileges."
+  [driver conn privilege-map]
+  (fn [{schema :schema table :name ttype :type} privilege]
+    (assert (#{:select :write} privilege))
+    ;; driver/current-user-table-privileges does not return privileges for foreign
+    ;; table on postgres, so we need to use the select method on them
+    ;;
+    ;; TODO FIXME What the hecc!!! We should NOT be hardcoding driver-specific hacks in functions like this!!!!
+    ;; (^ original author: Cam)
+    (if (#{[:postgres "FOREIGN TABLE"]}
+         [driver ttype])
+      (case privilege
+        :select (sql-jdbc.sync.interface/have-select-privilege? driver conn schema table)
+        :write  nil) ; Foreign tables typically don't support write operations
+      (contains? (get-in privilege-map [schema table] #{}) privilege))))
+
+(defn- probe-privilege-fn
+  "Fallback privilege-checking function that probes each table individually (N+1)."
+  [driver conn]
+  (fn [{schema :schema table :name} privilege]
+    (assert (#{:select :write} privilege))
+    (case privilege
+      :select (sql-jdbc.sync.interface/have-select-privilege? driver conn schema table)
+      :write  nil)))
+
+(defn have-privilege-fn
+  "Returns a function that takes a map with 3 keys [:schema, :name, :type] and a privilege type,
+   returns true if the table has the specified privilege.
+
+   Privilege types:
+   - :select - Can read from the table
+   - :write - if table has insert, update, delete permissions
+
+  This function shouldn't be called with `map` or anything alike, instead use it as a cache function like so:
+
+    (let [privilege-fn (have-privilege-fn driver conn)
+          tables       ...]
+      (filter #(privilege-fn % :select) tables))"
+  [driver conn]
+  ;; `sql-jdbc.sync.interface/have-select-privilege?` is slow because we're doing a SELECT query on each table
+  ;; It's basically a N+1 operation where N is the number of tables in the database
+  (let [supports-table-privs? (driver/database-supports? driver :table-privileges nil)
+        privilege-map          (when supports-table-privs?
+                                 (build-privilege-map driver conn))]
+    (cond
+      ;; Default fast, bulk query that returns all privs in one query
+      (seq privilege-map)
+      (privilege-fn-from-map driver conn privilege-map)
+
+      supports-table-privs?
+      ;; Safety net: if current-user-table-privileges returned nothing, fall back to the N+1 probe approach
+      ;; rather than filtering out all tables (which would retire every table on next sync).
+      (do (log/warn "current-user-table-privileges returned empty results for driver" driver
+                    "- falling back to per-table privilege checks")
+          (probe-privilege-fn driver conn))
+
+      :else
+      (let [can-check-writable?          (driver/database-supports? driver :metadata/table-writable-check {:connection conn})
+            check-writable-privilege-map (when can-check-writable?
+                                           (build-privilege-map driver conn))]
+        (fn [{schema :schema table :name} privilege]
+          (assert (#{:select :write} privilege))
+          (case privilege
+            :select (sql-jdbc.sync.interface/have-select-privilege? driver conn schema table)
+            :write  (when can-check-writable?
+                      (contains? (get-in check-writable-privilege-map [schema table] #{}) privilege))))))))
 
 (defn fast-active-tables
   "Default, fast implementation of `active-tables` best suited for DBs with lots of system tables (like Oracle). Fetch
@@ -97,73 +251,71 @@
 
   This is as much as 15x faster for Databases with lots of system tables than `post-filtered-active-tables` (4 seconds
   vs 60)."
-  [driver ^Connection conn & [db-name-or-nil]]
+  [driver ^Connection conn & [db-name-or-nil schema-inclusion-filters schema-exclusion-filters]]
   {:pre [(instance? Connection conn)]}
-  (let [metadata (.getMetaData conn)]
-    (eduction
-     (comp (mapcat (fn [schema]
-                     (db-tables driver metadata schema db-name-or-nil)))
-           (filter (fn [{table-schema :schema, table-name :name}]
-                     (i/have-select-privilege? driver conn table-schema table-name))))
-     (i/syncable-schemas driver conn metadata))))
+  (let [metadata         (.getMetaData conn)
+        syncable-schemas (sql-jdbc.sync.interface/filtered-syncable-schemas driver conn metadata
+                                                                            schema-inclusion-filters schema-exclusion-filters)
+        privilege-fn     (have-privilege-fn driver conn)]
+    (eduction (mapcat (fn [schema]
+                        (eduction
+                         (comp (filter #(privilege-fn % :select))
+                               (map (fn [table]
+                                      (-> table
+                                          (dissoc :type)
+                                          (assoc :is_writable (privilege-fn table :write))))))
+                         (db-tables driver metadata schema db-name-or-nil))))
+              syncable-schemas)))
 
-(defmethod i/active-tables :sql-jdbc
-  [driver connection]
-  (fast-active-tables driver connection))
+(defmethod sql-jdbc.sync.interface/active-tables :sql-jdbc
+  [driver connection schema-inclusion-filters schema-exclusion-filters]
+  (fast-active-tables driver connection nil schema-inclusion-filters schema-exclusion-filters))
 
 (defn post-filtered-active-tables
   "Alternative implementation of `active-tables` best suited for DBs with little or no support for schemas. Fetch *all*
   Tables, then filter out ones whose schema is in `excluded-schemas` Clojure-side."
-  [driver ^Connection conn & [db-name-or-nil]]
+  [driver ^Connection conn & [db-name-or-nil schema-inclusion-filters schema-exclusion-filters]]
   {:pre [(instance? Connection conn)]}
-  (eduction
-   (filter (let [excluded (i/excluded-schemas driver)]
-             (fn [{table-schema :schema, table-name :name}]
-               (and (not (contains? excluded table-schema))
-                    (i/have-select-privilege? driver conn table-schema table-name)))))
-   (db-tables driver (.getMetaData conn) nil db-name-or-nil)))
+  (let [privilege-fn (have-privilege-fn driver conn)]
+    (eduction
+     (comp
+      (filter (let [excluded (sql-jdbc.sync.interface/excluded-schemas driver)]
+                (fn [{table-schema :schema :as table}]
+                  (and (not (contains? excluded table-schema))
+                       (include-schema-logging-exclusion schema-inclusion-filters schema-exclusion-filters table-schema)
+                       (privilege-fn table :select)))))
+      (map (fn [table]
+             (-> table
+                 (dissoc :type)
+                 (assoc :is_writable (privilege-fn table :write))))))
+     (db-tables driver (.getMetaData conn) nil db-name-or-nil))))
 
-(defn describe-database
-  "Default implementation of `driver/describe-database` for SQL JDBC drivers. Uses JDBC DatabaseMetaData."
-  [driver db-or-id-or-spec]
-  {:tables (with-open [conn (jdbc/get-connection (sql-jdbc.conn/db->pooled-connection-spec db-or-id-or-spec))]
-             ;; try to set the Connection to `READ_UNCOMMITED` if possible, or whatever the next least-locking level
-             ;; is. Not sure how much of a difference that makes since we're not running this inside a transaction,
-             ;; but better safe than sorry
-             (sql-jdbc.execute/set-best-transaction-level! driver conn)
-             (into #{} (i/active-tables driver conn)))})
+(defn db-or-id-or-spec->database
+  "Get database instance from `db-or-id-or-spec`."
+  [db-or-id-or-spec]
+  (cond (driver-api/instance-of? :model/Database db-or-id-or-spec)
+        db-or-id-or-spec
 
-(defn- schema-pattern->re-pattern ^Pattern [schema-pattern]
-  (re-pattern (-> (str/replace schema-pattern #"(^|[^\\\\])\*" "$1.*")
-                  (str/replace #"(^|[^\\\\])," "$1|"))))
+        (int? db-or-id-or-spec)
+        (driver-api/with-metadata-provider db-or-id-or-spec
+          (driver-api/database (driver-api/metadata-provider)))
 
-(defn- schema-patterns->filter-fn*
-  [inclusion-patterns exclusion-patterns]
-  (let [inclusion-blank? (str/blank? inclusion-patterns)
-        exclusion-blank? (str/blank? exclusion-patterns)]
-    (cond
-      (and inclusion-blank? exclusion-blank?)
-      (constantly true)
+        :else
+        nil))
 
-      (and (not inclusion-blank?) (not exclusion-blank?))
-      (throw (ex-info "Inclusion and exclusion patterns cannot both be specified"
-                      {::inclusion-patterns inclusion-patterns
-                       ::exclusion-patterns exclusion-patterns}))
-
-      true
-      (let [inclusion? exclusion-blank?
-            pattern    (schema-pattern->re-pattern (if inclusion? inclusion-patterns exclusion-patterns))]
-        (fn [s]
-          (let [m        (.matcher pattern s)
-                matches? (.matches m)]
-            (if inclusion? matches? (not matches?))))))))
-
-(def ^:private schema-patterns->filter-fn (memoize schema-patterns->filter-fn*))
-
-(defn include-schema?
-  ;; TODO: add more docstring details here, and move to different ns (not strictly JDBC)
-  "Returns true of the given `schema-name` should be included/synced, considering the given `inclusion-patterns` and
-  `exclusion-patterns`."
-  [schema-name inclusion-patterns exclusion-patterns]
-  (let [filter-fn (schema-patterns->filter-fn inclusion-patterns exclusion-patterns)]
-    (filter-fn schema-name)))
+(mu/defn describe-database
+  "Default implementation of [[metabase.driver/describe-database]] for SQL JDBC drivers. Uses JDBC DatabaseMetaData."
+  [driver           :- :keyword
+   db-or-id-or-spec :- [:or :int :map]]
+  {:tables
+   (sql-jdbc.execute/do-with-connection-with-options
+    driver
+    db-or-id-or-spec
+    nil
+    (fn [^Connection conn]
+      (let [schema-filter-prop   (driver.u/find-schema-filters-prop driver)
+            database             (db-or-id-or-spec->database db-or-id-or-spec)
+            [inclusion-patterns
+             exclusion-patterns] (when (some? schema-filter-prop)
+                                   (driver.s/db-details->schema-filter-patterns (:name schema-filter-prop) database))]
+        (into #{} (sql-jdbc.sync.interface/active-tables driver conn inclusion-patterns exclusion-patterns)))))})

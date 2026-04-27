@@ -1,41 +1,40 @@
 /* eslint "react/prop-types": "warn" */
-import React, { Component } from "react";
+import cx from "classnames";
+import dayjs from "dayjs";
 import PropTypes from "prop-types";
-import { connect } from "react-redux";
-import moment from "moment";
+import { Component } from "react";
 import { t } from "ttag";
+
+import { AdminAwareEmptyState } from "metabase/common/components/AdminAwareEmptyState";
+import { List } from "metabase/common/components/List";
+import S from "metabase/common/components/List/List.module.css";
+import { ListItem } from "metabase/common/components/ListItem";
+import { LoadingAndErrorWrapper } from "metabase/common/components/LoadingAndErrorWrapper";
+import CS from "metabase/css/core/index.css";
+import * as metadataActions from "metabase/redux/metadata";
+import { getMetadata } from "metabase/selectors/metadata";
+import { connect } from "metabase/utils/redux";
+import * as Urls from "metabase/utils/urls";
 import visualizations from "metabase/visualizations";
-import * as Urls from "metabase/lib/urls";
-
-import S from "metabase/components/List.css";
-
-import List from "metabase/components/List";
-import ListItem from "metabase/components/ListItem";
-import AdminAwareEmptyState from "metabase/components/AdminAwareEmptyState";
-
-import LoadingAndErrorWrapper from "metabase/components/LoadingAndErrorWrapper";
 
 import ReferenceHeader from "../components/ReferenceHeader";
-
-import { getQuestionUrl } from "../utils";
-
 import {
-  getTableQuestions,
   getError,
   getLoading,
   getTable,
+  getTableQuestions,
 } from "../selectors";
+import { getQuestionUrl } from "../utils";
 
-import * as metadataActions from "metabase/redux/metadata";
-
-const emptyStateData = table => {
+const emptyStateData = (table, metadata) => {
   return {
     message: t`Questions about this table will appear here as they're added`,
-    icon: "all",
+    icon: "folder",
     action: t`Ask a question`,
     link: getQuestionUrl({
       dbId: table.db_id,
       tableId: table.id,
+      metadata,
     }),
   };
 };
@@ -45,27 +44,27 @@ const mapStateToProps = (state, props) => ({
   entities: getTableQuestions(state, props),
   loading: getLoading(state, props),
   loadingError: getError(state, props),
+  metadata: getMetadata(state),
 });
 
 const mapDispatchToProps = {
   ...metadataActions,
 };
 
-@connect(mapStateToProps, mapDispatchToProps)
-export default class TableQuestions extends Component {
+class TableQuestions extends Component {
   static propTypes = {
     table: PropTypes.object.isRequired,
-    style: PropTypes.object.isRequired,
+    metadata: PropTypes.object.isRequired,
     entities: PropTypes.object.isRequired,
     loading: PropTypes.bool,
     loadingError: PropTypes.object,
   };
 
   render() {
-    const { entities, style, loadingError, loading } = this.props;
+    const { entities, loadingError, loading, table, metadata } = this.props;
 
     return (
-      <div style={style} className="full">
+      <div>
         <ReferenceHeader
           name={t`Questions about ${this.props.table.display_name}`}
           type="questions"
@@ -77,32 +76,29 @@ export default class TableQuestions extends Component {
         >
           {() =>
             Object.keys(entities).length > 0 ? (
-              <div className="wrapper wrapper--trim">
+              <div className={cx(CS.wrapper, CS.wrapperTrim)}>
                 <List>
                   {Object.values(entities).map(
-                    (entity, index) =>
+                    (entity) =>
                       entity &&
                       entity.id &&
                       entity.name && (
-                        <li className="relative" key={entity.id}>
-                          <ListItem
-                            id={entity.id}
-                            index={index}
-                            name={entity.display_name || entity.name}
-                            description={t`Created ${moment(
-                              entity.created_at,
-                            ).fromNow()} by ${entity.creator.common_name}`}
-                            url={Urls.question(entity)}
-                            icon={visualizations.get(entity.display).iconName}
-                          />
-                        </li>
+                        <ListItem
+                          key={entity.id}
+                          name={entity.display_name || entity.name}
+                          description={t`Created ${dayjs(
+                            entity.created_at,
+                          ).fromNow()} by ${entity.creator.common_name}`}
+                          url={Urls.question(entity)}
+                          icon={visualizations.get(entity.display).iconName}
+                        />
                       ),
                   )}
                 </List>
               </div>
             ) : (
               <div className={S.empty}>
-                <AdminAwareEmptyState {...emptyStateData(this.props.table)} />
+                <AdminAwareEmptyState {...emptyStateData(table, metadata)} />
               </div>
             )
           }
@@ -111,3 +107,6 @@ export default class TableQuestions extends Component {
     );
   }
 }
+
+// eslint-disable-next-line import/no-default-export -- deprecated usage
+export default connect(mapStateToProps, mapDispatchToProps)(TableQuestions);

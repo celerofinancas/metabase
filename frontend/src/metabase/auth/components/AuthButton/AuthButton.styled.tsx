@@ -1,14 +1,14 @@
-import styled from "styled-components";
-import { color } from "metabase/lib/colors";
-import Icon from "metabase/components/Icon";
-import Link from "metabase/components/Link";
+// eslint-disable-next-line no-restricted-imports
+import styled from "@emotion/styled";
+
+import { Link } from "metabase/common/components/Link";
 
 export const TextLink = styled(Link)`
   cursor: pointer;
-  color: ${color("text-dark")};
+  color: var(--mb-color-text-primary);
 
   &:hover {
-    color: ${color("brand")};
+    color: var(--mb-color-brand);
   }
 `;
 
@@ -17,13 +17,9 @@ export const CardLink = styled(TextLink)`
   justify-content: center;
   align-items: center;
   padding: 1.25rem;
-  background-color: ${color("white")};
-  box-shadow: 0 3px 10px ${color("shadow")};
+  background-color: var(--mb-color-background-primary);
+  box-shadow: 0 3px 10px var(--mb-color-shadow);
   border-radius: 6px;
-`;
-
-export const CardIcon = styled(Icon)`
-  margin-right: 0.5rem;
 `;
 
 export const CardText = styled.span`

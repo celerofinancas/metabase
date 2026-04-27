@@ -1,37 +1,33 @@
 /* eslint "react/prop-types": "warn" */
-import React, { Component } from "react";
+import cx from "classnames";
+import { useFormik } from "formik";
 import PropTypes from "prop-types";
-import { connect } from "react-redux";
-import { reduxForm } from "redux-form";
 import { push } from "react-router-redux";
 import { t } from "ttag";
-import S from "metabase/reference/Reference.css";
 
-import List from "metabase/components/List";
-import LoadingAndErrorWrapper from "metabase/components/LoadingAndErrorWrapper";
-
-import EditHeader from "metabase/reference/components/EditHeader";
-import EditableReferenceHeader from "metabase/reference/components/EditableReferenceHeader";
+import { LoadingAndErrorWrapper } from "metabase/common/components/LoadingAndErrorWrapper";
+import CS from "metabase/css/core/index.css";
+import * as metadataActions from "metabase/redux/metadata";
+import S from "metabase/reference/Reference.module.css";
 import Detail from "metabase/reference/components/Detail";
+import { EditHeader } from "metabase/reference/components/EditHeader";
+import EditableReferenceHeader from "metabase/reference/components/EditableReferenceHeader";
 import FieldTypeDetail from "metabase/reference/components/FieldTypeDetail";
 import UsefulQuestions from "metabase/reference/components/UsefulQuestions";
-
-import { getQuestionUrl } from "../utils";
+import * as actions from "metabase/reference/reference";
+import { connect } from "metabase/utils/redux";
 
 import {
-  getField,
-  getTable,
   getDatabase,
   getError,
-  getLoading,
-  getUser,
+  getField,
   getIsEditing,
   getIsFormulaExpanded,
-  getForeignKeys,
+  getLoading,
+  getTable,
+  getUser,
 } from "../selectors";
-
-import * as metadataActions from "metabase/redux/metadata";
-import * as actions from "metabase/reference/reference";
+import { getQuestionUrl } from "../utils";
 
 const interestingQuestions = (database, table, field, metadata) => {
   return [
@@ -84,7 +80,6 @@ const mapStateToProps = (state, props) => {
     // naming this 'error' will conflict with redux form
     loadingError: getError(state, props),
     user: getUser(state, props),
-    foreignKeys: getForeignKeys(state, props),
     isEditing: getIsEditing(state, props),
     isFormulaExpanded: getIsFormulaExpanded(state, props),
   };
@@ -93,196 +88,189 @@ const mapStateToProps = (state, props) => {
 const mapDispatchToProps = {
   ...metadataActions,
   ...actions,
+  onSubmit: actions.rUpdateFieldDetail,
   onChangeLocation: push,
 };
 
-const validate = (values, props) => {
-  return {};
+const propTypes = {
+  style: PropTypes.object.isRequired,
+  entity: PropTypes.object.isRequired,
+  field: PropTypes.object.isRequired,
+  table: PropTypes.object,
+  user: PropTypes.object.isRequired,
+  database: PropTypes.object.isRequired,
+  isEditing: PropTypes.bool,
+  startEditing: PropTypes.func.isRequired,
+  endEditing: PropTypes.func.isRequired,
+  startLoading: PropTypes.func.isRequired,
+  endLoading: PropTypes.func.isRequired,
+  setError: PropTypes.func.isRequired,
+  updateField: PropTypes.func.isRequired,
+  loading: PropTypes.bool,
+  loadingError: PropTypes.object,
+  metadata: PropTypes.object,
+  onSubmit: PropTypes.func.isRequired,
 };
 
-@connect(mapStateToProps, mapDispatchToProps)
-@reduxForm({
-  form: "details",
-  fields: [
-    "name",
-    "display_name",
-    "description",
-    "revision_message",
-    "points_of_interest",
-    "caveats",
-    "semantic_type",
-    "fk_target_field_id",
-  ],
-  validate,
-})
-export default class FieldDetail extends Component {
-  static propTypes = {
-    style: PropTypes.object.isRequired,
-    entity: PropTypes.object.isRequired,
-    field: PropTypes.object.isRequired,
-    table: PropTypes.object,
-    user: PropTypes.object.isRequired,
-    database: PropTypes.object.isRequired,
-    foreignKeys: PropTypes.object,
-    isEditing: PropTypes.bool,
-    startEditing: PropTypes.func.isRequired,
-    endEditing: PropTypes.func.isRequired,
-    startLoading: PropTypes.func.isRequired,
-    endLoading: PropTypes.func.isRequired,
-    setError: PropTypes.func.isRequired,
-    updateField: PropTypes.func.isRequired,
-    handleSubmit: PropTypes.func.isRequired,
-    resetForm: PropTypes.func.isRequired,
-    fields: PropTypes.object.isRequired,
-    loading: PropTypes.bool,
-    loadingError: PropTypes.object,
-    submitting: PropTypes.bool,
-    metadata: PropTypes.object,
-  };
+const FieldDetail = (props) => {
+  const {
+    style,
+    entity,
+    table,
+    loadingError,
+    loading,
+    user,
+    isEditing,
+    startEditing,
+    endEditing,
+    metadata,
+    onSubmit,
+  } = props;
 
-  render() {
-    const {
-      fields: {
-        name,
-        display_name,
-        description,
-        revision_message,
-        points_of_interest,
-        caveats,
-        semantic_type,
-        fk_target_field_id,
-      },
-      style,
-      entity,
-      table,
-      loadingError,
-      loading,
-      user,
-      foreignKeys,
-      isEditing,
-      startEditing,
-      endEditing,
-      handleSubmit,
-      resetForm,
-      submitting,
-      metadata,
-    } = this.props;
+  const {
+    isSubmitting,
+    getFieldProps,
+    getFieldMeta,
+    handleSubmit,
+    handleReset,
+  } = useFormik({
+    initialValues: {},
+    onSubmit: (fields) =>
+      onSubmit(fields, { ...props, resetForm: handleReset }),
+  });
 
-    const onSubmit = handleSubmit(
-      async fields => await actions.rUpdateFieldDetail(fields, this.props),
-    );
+  const getFormField = (name) => ({
+    ...getFieldProps(name),
+    ...getFieldMeta(name),
+  });
 
-    return (
-      <form style={style} className="full" onSubmit={onSubmit}>
-        {isEditing && (
-          <EditHeader
-            hasRevisionHistory={false}
-            onSubmit={onSubmit}
-            endEditing={endEditing}
-            reinitializeForm={resetForm}
-            submitting={submitting}
-            revisionMessageFormField={revision_message}
-          />
-        )}
-        <EditableReferenceHeader
-          entity={entity}
-          table={table}
-          type="field"
-          headerIcon="field"
-          name="Details"
-          user={user}
-          isEditing={isEditing}
-          hasSingleSchema={false}
-          hasDisplayName={true}
-          startEditing={startEditing}
-          displayNameFormField={display_name}
-          nameFormField={name}
+  return (
+    <form style={style} className={CS.full} onSubmit={handleSubmit}>
+      {isEditing && (
+        <EditHeader
+          hasRevisionHistory={false}
+          onSubmit={handleSubmit}
+          endEditing={endEditing}
+          reinitializeForm={handleReset}
+          submitting={isSubmitting}
+          revisionMessageFormField={getFormField("revision_message")}
         />
-        <LoadingAndErrorWrapper
-          loading={!loadingError && loading}
-          error={loadingError}
-        >
-          {() => (
-            <div className="wrapper">
-              <div className="pl4 pr3 pt4 mb4 mb1 bg-white rounded bordered">
-                <List>
-                  <li className="relative">
+      )}
+      <EditableReferenceHeader
+        entity={entity}
+        table={table}
+        type="field"
+        headerIcon="field"
+        name="Details"
+        user={user}
+        isEditing={isEditing}
+        hasSingleSchema={false}
+        hasDisplayName={true}
+        startEditing={startEditing}
+        displayNameFormField={getFormField("display_name")}
+        nameFormField={getFormField("name")}
+      />
+      <LoadingAndErrorWrapper
+        loading={!loadingError && loading}
+        error={loadingError}
+      >
+        {() => (
+          <div className={CS.wrapper}>
+            <div
+              className={cx(
+                CS.pl4,
+                CS.pr3,
+                CS.pt4,
+                CS.mb4,
+                CS.mb1,
+                CS.bgWhite,
+                CS.rounded,
+                CS.bordered,
+              )}
+            >
+              <ul>
+                <li>
+                  <Detail
+                    id="description"
+                    name={t`Description`}
+                    description={entity.description}
+                    placeholder={t`No description yet`}
+                    isEditing={isEditing}
+                    field={getFormField("description")}
+                  />
+                </li>
+                {!isEditing && (
+                  <li>
                     <Detail
-                      id="description"
-                      name={t`Description`}
-                      description={entity.description}
-                      placeholder={t`No description yet`}
-                      isEditing={isEditing}
-                      field={description}
+                      id="name"
+                      name={t`Actual name in database`}
+                      description={entity.name}
+                      subtitleClass={S.tableActualName}
                     />
                   </li>
-                  {!isEditing && (
-                    <li className="relative">
-                      <Detail
-                        id="name"
-                        name={t`Actual name in database`}
-                        description={entity.name}
-                        subtitleClass={S.tableActualName}
-                      />
-                    </li>
-                  )}
-                  <li className="relative">
-                    <Detail
-                      id="points_of_interest"
-                      name={t`Why this field is interesting`}
-                      description={entity.points_of_interest}
-                      placeholder={t`Nothing interesting yet`}
-                      isEditing={isEditing}
-                      field={points_of_interest}
-                    />
-                  </li>
-                  <li className="relative">
-                    <Detail
-                      id="caveats"
-                      name={t`Things to be aware of about this field`}
-                      description={entity.caveats}
-                      placeholder={t`Nothing to be aware of yet`}
-                      isEditing={isEditing}
-                      field={caveats}
-                    />
-                  </li>
+                )}
+                <li>
+                  <Detail
+                    id="points_of_interest"
+                    name={t`Why this field is interesting`}
+                    description={entity.points_of_interest}
+                    placeholder={t`Nothing interesting yet`}
+                    isEditing={isEditing}
+                    field={getFormField("points_of_interest")}
+                  />
+                </li>
+                <li>
+                  <Detail
+                    id="caveats"
+                    name={t`Things to be aware of about this field`}
+                    description={entity.caveats}
+                    placeholder={t`Nothing to be aware of yet`}
+                    isEditing={isEditing}
+                    field={getFormField("caveats")}
+                  />
+                </li>
 
-                  {!isEditing && (
-                    <li className="relative">
-                      <Detail
-                        id="base_type"
-                        name={t`Data type`}
-                        description={entity.base_type}
-                      />
-                    </li>
-                  )}
-                  <li className="relative">
-                    <FieldTypeDetail
-                      field={entity}
-                      foreignKeys={foreignKeys}
-                      fieldTypeFormField={semantic_type}
-                      foreignKeyFormField={fk_target_field_id}
-                      isEditing={isEditing}
+                {!isEditing && (
+                  <li>
+                    <Detail
+                      id="base_type"
+                      name={t`Data type`}
+                      description={entity.database_type}
                     />
                   </li>
-                  {!isEditing && (
-                    <li className="relative">
-                      <UsefulQuestions
-                        questions={interestingQuestions(
-                          this.props.database,
-                          this.props.table,
-                          this.props.field,
-                          metadata,
-                        )}
-                      />
-                    </li>
-                  )}
-                </List>
-              </div>
+                )}
+                <li>
+                  <FieldTypeDetail
+                    databaseId={table.db_id}
+                    field={entity}
+                    fieldTypeFormField={getFormField("semantic_type")}
+                    foreignKeyFormField={getFormField("fk_target_field_id")}
+                    fieldSettingsFormField={getFormField("settings")}
+                    isEditing={isEditing}
+                  />
+                </li>
+                {!isEditing && (
+                  <li>
+                    <UsefulQuestions
+                      questions={interestingQuestions(
+                        props.database,
+                        props.table,
+                        props.field,
+                        metadata,
+                      )}
+                    />
+                  </li>
+                )}
+              </ul>
             </div>
-          )}
-        </LoadingAndErrorWrapper>
-      </form>
-    );
-  }
-}
+          </div>
+        )}
+      </LoadingAndErrorWrapper>
+    </form>
+  );
+};
+
+FieldDetail.propTypes = propTypes;
+
+// eslint-disable-next-line import/no-default-export -- deprecated usage
+export default connect(mapStateToProps, mapDispatchToProps)(FieldDetail);

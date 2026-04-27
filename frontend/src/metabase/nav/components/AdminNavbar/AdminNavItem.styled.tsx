@@ -1,13 +1,52 @@
-import styled from "styled-components";
-import Link, { LinkProps } from "metabase/components/Link";
-import { alpha, color } from "metabase/lib/colors";
+// eslint-disable-next-line no-restricted-imports
+import styled from "@emotion/styled";
 
-interface AdminNavLinkProps extends LinkProps {
+import { Link } from "metabase/common/components/Link";
+import { doNotForwardProps } from "metabase/common/utils/doNotForwardProps";
+import { breakpointMaxLarge } from "metabase/styled-components/theme";
+import { darken } from "metabase/ui/colors";
+
+interface AdminNavLinkProps {
+  to: string;
   isSelected?: boolean;
+  isInMobileNav?: boolean;
 }
 
-export const AdminNavLink = styled<AdminNavLinkProps>(Link)`
+export const AdminNavLink = styled(
+  Link,
+  doNotForwardProps("isSelected", "isInMobileNav"),
+)<AdminNavLinkProps>`
+  white-space: nowrap;
+  ${(props) => (props.isInMobileNav ? "" : "overflow: hidden;")}
+  text-overflow: ellipsis;
   padding: 0.5rem 1rem;
-  text-decoration: none;
-  color: ${props => (props.isSelected ? color("white") : alpha("white", 0.63))};
+  ${breakpointMaxLarge} {
+    padding-inline: 0.85rem;
+  }
+
+  transition: all 200ms;
+  border-radius: 4px;
+  color: ${(props) =>
+    props.isSelected
+      ? "var(--mb-color-text-primary-inverse)"
+      : "color-mix(in srgb, var(--mb-color-text-primary-inverse), transparent 35%)"};
+  background-color: ${(props) =>
+    props.isSelected ? darken("admin-navbar") : "transparent"};
+
+  &:hover {
+    color: var(--mb-color-text-primary-inverse);
+    background-color: ${() => darken("admin-navbar")};
+  }
+`;
+
+export const AdminNavListItem = styled(
+  "li",
+  doNotForwardProps("path", "currentPath"),
+)<{ path: string; currentPath: string }>`
+  display: inline-flex;
+  flex-shrink: 1;
+  white-space: nowrap;
+  justify-content: center;
+  min-width: ${(props) =>
+    props.currentPath.startsWith(props.path) ? "fit-content" : "0px"};
 `;

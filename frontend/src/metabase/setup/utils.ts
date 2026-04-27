@@ -1,12 +1,19 @@
+import { getIn } from "icepick";
 import _ from "underscore";
-import { Locale, LocaleData } from "./types";
+
+import type { Locale } from "metabase/redux/store";
+import { UtilApi } from "metabase/services";
+import { passwordComplexityDescription } from "metabase/utils/password";
+import type { LocaleData } from "metabase-types/api";
+
+import { SUBSCRIBE_TOKEN, SUBSCRIBE_URL } from "./constants";
 
 export const getLocales = (
   localeData: LocaleData[] = [["en", "English"]],
 ): Locale[] => {
   return _.chain(localeData)
     .map(([code, name]) => ({ code, name }))
-    .sortBy(locale => locale.name)
+    .sortBy((locale) => locale.name)
     .value();
 };
 
@@ -23,18 +30,32 @@ export const getDefaultLocale = (
   );
 };
 
-export const getUserToken = (hash = window.location.hash): string => {
-  return hash.replace(/^#/, "");
+export const validatePassword = async (password: string) => {
+  const error = passwordComplexityDescription(password);
+  if (error) {
+    return error;
+  }
+
+  try {
+    await UtilApi.password_check({ password });
+  } catch (error) {
+    return getIn(error, ["data", "errors", "password"]);
+  }
 };
 
-const SUBSCRIBE_URL =
-  "https://metabase.us10.list-manage.com/subscribe/post?u=869fec0e4689e8fd1db91e795&id=b9664113a8";
-const SUBSCRIBE_TOKEN = "b_869fec0e4689e8fd1db91e795_b9664113a8";
-
-export const subscribeToNewsletter = async (email: string): Promise<void> => {
+export const subscribeToNewsletter = (email: string) => {
   const body = new FormData();
   body.append("EMAIL", email);
   body.append(SUBSCRIBE_TOKEN, "");
 
-  await fetch(SUBSCRIBE_URL, { method: "POST", mode: "no-cors", body });
+  if ("sendBeacon" in navigator) {
+    navigator.sendBeacon(SUBSCRIBE_URL, body);
+  } else {
+    fetch(SUBSCRIBE_URL, {
+      method: "POST",
+      mode: "no-cors",
+      body,
+      keepalive: true,
+    });
+  }
 };

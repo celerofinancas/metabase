@@ -1,64 +1,107 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
-import { t } from "ttag";
+import { useDebouncedValue, useResizeObserver } from "@mantine/hooks";
+import { GoogleLogin, GoogleOAuthProvider } from "@react-oauth/google";
 import { getIn } from "icepick";
-import AuthButton from "../AuthButton";
-import { AuthError, AuthErrorContainer } from "./GoogleButton.styled";
+import { useCallback, useState } from "react";
+import { t } from "ttag";
 
-export type AttachCallback = (
-  element: HTMLElement,
-  onLogin: (token: string) => void,
-  onError: (error: string) => void,
-) => void;
+import ErrorBoundary from "metabase/ErrorBoundary";
+import { Link } from "metabase/common/components/Link";
+import { Box, Checkbox, useColorScheme } from "metabase/ui";
+import { getCspNonce } from "metabase/utils/csp";
+import { useDispatch, useSelector } from "metabase/utils/redux";
+import * as Urls from "metabase/utils/urls";
 
-export interface GoogleButtonProps {
-  isCard?: boolean;
+import { loginGoogle } from "../../actions";
+import { getGoogleClientId, getSiteLocale } from "../../selectors";
+
+import S from "./GoogleButton.module.css";
+
+interface GoogleButtonProps {
   redirectUrl?: string;
-  onAttach: AttachCallback;
-  onLogin: (token: string, redirectUrl?: string) => void;
+  isCard?: boolean;
 }
 
-const GoogleButton = ({
-  isCard,
-  redirectUrl,
-  onAttach,
-  onLogin,
-}: GoogleButtonProps) => {
-  const ref = useRef<HTMLDivElement>(null);
+interface CredentialResponse {
+  credential?: string;
+}
+
+export const GoogleButton = ({ redirectUrl, isCard }: GoogleButtonProps) => {
+  const [remember, setRemember] = useState(false);
+  const clientId = useSelector(getGoogleClientId);
+  const locale = useSelector(getSiteLocale);
   const [errors, setErrors] = useState<string[]>([]);
+  const dispatch = useDispatch();
+
+  const { resolvedColorScheme } = useColorScheme();
 
   const handleLogin = useCallback(
-    async (token: string) => {
+    async ({ credential = "" }: CredentialResponse) => {
       try {
         setErrors([]);
-        await onLogin(token, redirectUrl);
+        await dispatch(
+          loginGoogle({ credential, redirectUrl, remember }),
+        ).unwrap();
       } catch (error) {
         setErrors(getErrors(error));
       }
     },
-    [onLogin, redirectUrl],
+    [dispatch, redirectUrl, remember],
   );
 
-  const handleError = useCallback((error: string) => {
-    setErrors([error]);
+  const handleError = useCallback(() => {
+    setErrors([
+      t`There was an issue signing in with Google. Please contact an administrator.`,
+    ]);
   }, []);
 
-  useEffect(() => {
-    ref.current && onAttach(ref.current, handleLogin, handleError);
-  }, [onAttach, handleLogin, handleError]);
+  const [buttonContainer, rect] = useResizeObserver();
+
+  const [width] = useDebouncedValue(rect.width, 200);
 
   return (
-    <div ref={ref}>
-      <AuthButton icon="google" isCard={isCard}>
-        {t`Sign in with Google`}
-      </AuthButton>
-      {errors.length > 0 && (
-        <AuthErrorContainer>
-          {errors.map((error, index) => (
-            <AuthError key={index}>{error}</AuthError>
-          ))}
-        </AuthErrorContainer>
+    <Box ref={buttonContainer}>
+      {isCard && clientId ? (
+        <ErrorBoundary>
+          <GoogleOAuthProvider clientId={clientId} nonce={getCspNonce()}>
+            <GoogleLogin
+              useOneTap
+              onSuccess={handleLogin}
+              onError={handleError}
+              locale={locale}
+              width={width}
+              theme={
+                resolvedColorScheme === "dark" ? "filled_black" : "outline"
+              }
+              // This is needed to ensure that no white border shows up around the
+              // login button in dark mode (UXW-2138)
+              containerProps={{
+                style: { colorScheme: "light" },
+              }}
+            />
+          </GoogleOAuthProvider>
+          <Checkbox
+            mt="1rem"
+            checked={remember}
+            onChange={(e) => setRemember(e.target.checked)}
+            label={t`Remember me`}
+          />
+        </ErrorBoundary>
+      ) : (
+        <Link className={S.Link} to={Urls.login(redirectUrl)}>
+          {t`Sign in with Google`}
+        </Link>
       )}
-    </div>
+
+      {errors.length > 0 && (
+        <Box mt="1rem">
+          {errors.map((error, index) => (
+            <Box c="error" ta="center" key={index}>
+              {error}
+            </Box>
+          ))}
+        </Box>
+      )}
+    </Box>
   );
 };
 
@@ -66,5 +109,3 @@ const getErrors = (error: unknown): string[] => {
   const errors = getIn(error, ["data", "errors"]);
   return errors ? Object.values(errors) : [];
 };
-
-export default GoogleButton;

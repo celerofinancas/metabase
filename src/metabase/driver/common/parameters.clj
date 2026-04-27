@@ -1,8 +1,12 @@
 (ns metabase.driver.common.parameters
-  "Various record types below are used as a convenience for differentiating the different param types."
-  (:require [potemkin.types :as p.types]
-            [pretty.core :as pretty]
-            [schema.core :as s]))
+  "Various record types below are used as a convenience for differentiating the different param types.
+
+  DEPRECATED: `driver.common.parameters.*` namespaces deal with legacy MBQL queries. Migrate to MBQL-5-friendly
+  replacement namespaces. The replacement for this namespace is [[metabase.lib.parameters.parse.types]]."
+  {:deprecated "0.57.0"}
+  (:require
+   [potemkin.types :as p.types]
+   [pretty.core :as pretty]))
 
 ;; "FieldFilter" is something that expands to a clause like "some_field BETWEEN 1 AND 10"
 ;;
@@ -10,13 +14,13 @@
 ;;
 ;; `value`" is either:
 ;; * `no-value`
-;; *  A map contianing the value and type info for the value, e.g.
+;; *  A map containing the value and type info for the value, e.g.
 ;;
 ;;    {:type   :date/single
 ;;     :value  #t "2019-09-20T19:52:00.000-07:00"}
 ;;
 ;; *  A vector of maps like the one above (for multiple values)
-(p.types/defrecord+ FieldFilter [field value]
+(p.types/defrecord+ FieldFilter [field value alias]
   pretty/PrettyPrintable
   (pretty [this]
     (list (pretty/qualify-symbol-for-*ns* `map->FieldFilter) (into {} this))))
@@ -25,6 +29,16 @@
   "Is `x` an instance of the `FieldFilter` record type?"
   [x]
   (instance? FieldFilter x))
+
+(p.types/defrecord+ TemporalUnit [field value alias]
+  pretty/PrettyPrintable
+  (pretty [this]
+    (list (pretty/qualify-symbol-for-*ns* `map->TemporalUnit) (into {} this))))
+
+(defn TemporalUnit?
+  "Is `x` an instance of the `TemporalUnit` record type?"
+  [x]
+  (instance? TemporalUnit x))
 
 ;; A "ReferencedCardQuery" parameter expands to the native query of the referenced card.
 ;;
@@ -43,6 +57,32 @@
   "Is `x` an instance of the `ReferencedCardQuery` record type?"
   [x]
   (instance? ReferencedCardQuery x))
+
+;; A "ReferencedTableQuery" parameter expands to a query selecting from a specific table, potentially with a filter on a
+;; specific column.
+;;
+;; `table-id` is the id of the table being referenced
+;;
+;; `source-filters` is an optional sequence of filter maps applied to the table reference. Each filter map has:
+;;   :field-id  - the ID of the field to filter on
+;;   :op        - the comparison operator, one of :>, :>=, :<, :<=, :=, :!=
+;;   :value     - the value to compare against
+;; When present, the table reference is rendered as a filtered subquery:
+;;   (SELECT * FROM "table" WHERE "col" > ? AND "col" <= ?)
+;; source-filters was introduced to support incremental transforms, unused by the frontend.
+;;
+;; `alias` is an optional string alias for the table reference. When present, the expansion includes
+;; an AS clause: "table" AS "alias" or (SELECT ...) AS "alias".
+;; Resolved from the template tag's `:emit-alias` boolean and `:name` during parsing.
+(p.types/defrecord+ ReferencedTableQuery [table-id source-filters alias]
+  pretty/PrettyPrintable
+  (pretty [this]
+    (list (pretty/qualify-symbol-for-*ns* `map->ReferencedTableQuery) (into {} this))))
+
+(defn ReferencedTableQuery?
+  "Is `x` an instance of the `ReferencedTableQuery` record type?"
+  [x]
+  (instance? ReferencedTableQuery x))
 
 ;; A `ReferencedQuerySnippet` expands to the partial query snippet stored in the `NativeQuerySnippet` table in the
 ;; application DB.
@@ -73,55 +113,42 @@
   (pretty [_]
     (list (pretty/qualify-symbol-for-*ns* `->DateRange) start end)))
 
-;; List of numbers to faciliate things like using params in a SQL `IN` clause. This is supported by both regular
-;; filter clauses (e.g. `IN ({{ids}})` and in field filters. Field filters also support sequences of values other than
-;; numbers, but these don't have a special record type. (TODO - we don't need a record type here, either. Just use a
-;; sequence)
-;;
-;; `numbers` are a sequence of `[java.lang.Number]`
-(p.types/defrecord+ CommaSeparatedNumbers [numbers]
+(p.types/defrecord+ DateTimeRange [start end]
   pretty/PrettyPrintable
   (pretty [_]
-    (list (pretty/qualify-symbol-for-*ns* `->CommaSeparatedNumbers) numbers)))
+    (list (pretty/qualify-symbol-for-*ns* `->DateRange) start end)))
 
 (def no-value
   "Convenience for representing an *optional* parameter present in a query but whose value is unspecified in the param
   values."
   ::no-value)
 
-(def SingleValue
-  "Schema for a valid *single* value for a param. As of 0.28.0 params can either be single-value or multiple value."
-  (s/cond-pre (s/eq no-value)
-              CommaSeparatedNumbers
-              FieldFilter
-              Date
-              s/Num
-              s/Str
-              s/Bool))
-
-;; Sequence of multiple values for generating a SQL IN() clause. vales
-;; `values` are a sequence of `[SingleValue]`
-(p.types/defrecord+ MultipleValues [values]
-  pretty/PrettyPrintable
-  (pretty [_]
-    (list (pretty/qualify-symbol-for-*ns* `->MultipleValues) values)))
-
 (p.types/defrecord+ Param [k]
   pretty/PrettyPrintable
   (pretty [_]
     (list (pretty/qualify-symbol-for-*ns* `->Param) k)))
+
+(p.types/defrecord+ FunctionParam [function-name args]
+  pretty/PrettyPrintable
+  (pretty [_]
+    (list (pretty/qualify-symbol-for-*ns* `->FunctionParam) function-name args)))
 
 (p.types/defrecord+ Optional [args]
   pretty/PrettyPrintable
   (pretty [_]
     (cons (pretty/qualify-symbol-for-*ns* `->Optional) args)))
 
-;; `Param?` and `Optional?` exist mostly so you don't have to try to import the classes from this namespace which can
-;; cause problems if the ns isn't loaded first
+;; `Param?`, `FunctionParam?`, and `Optional?` exist mostly so you don't have to try to import the classes from this
+;; namespace which can cause problems if the ns isn't loaded first
 (defn Param?
   "Is `x` an instance of the `Param` record type?"
   [x]
   (instance? Param x))
+
+(defn FunctionParam?
+  "Is `x` an instance of the `FunctionParam` record type?"
+  [x]
+  (instance? FunctionParam x))
 
 (defn Optional?
   "Is `x` an instance of the `Optional` record type?"

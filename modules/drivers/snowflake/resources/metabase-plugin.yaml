@@ -8,15 +8,38 @@ driver:
   lazy-load: true
   parent: sql-jdbc
   connection-properties:
+    - name: use-hostname
+      type: section
+      default: false
+    - merge:
+        - host
+        - visible-if:
+            use-hostname: true
     - name: account
       display-name: Account name
-      helper-text: Enter your Account ID with the region that your Snowflake cluster is running on e.g. "xxxxxxxx.us-east-2.aws". Some regions don't have this suffix.
+      helper-text: Enter your Account ID with the region that your Snowflake cluster is running on e.g. "xxxxxxxx.us-east-2.aws". Some regions don't have this suffix.
       placeholder: xxxxxxxx.us-east-2.aws
       required: true
+      visible-if:
+        use-hostname: false
     - user
+    - name: use-password
+      display-name: "Authenticate with user and password"
+      description: Snowflake will soon block password authentication.
+      type: boolean
+      default: false
+    - name: private-key
+      display-name: RSA private key (PKCS#8/.p8)
+      type: secret
+      secret-kind: pem-cert
+      visible-if:
+        use-password: false
+      required: true
     - merge:
-        - password
-        - required: true
+      - password
+      - visible-if:
+          use-password: true
+        required: true
     - name: warehouse
       display-name: Warehouse
       helper-text: If your user doesn't have a default warehouse, enter the warehouse to connect to.
@@ -27,16 +50,18 @@ driver:
         - name: db
           required: true
           display-name: Database name (case sensitive)
-    - name: schema
-      display-name: Schema (optional)
-      helper-text: Only add tables to Metabase that come from a specific schema.
-      placeholder: just_crows
+    - name: schema-filters
+      type: schema-filters
+      display-name: Schemas
     - name: role
-      display-name: Role (optional)
+      display-name: Role (optional, required for connection impersonation)
       helper-text: Specify a role to override the database user’s default role.
       placeholder: user
     - cloud-ip-address-info
-    - ssh-tunnel
+    - group:
+        container-style: ["component", "backdrop"]
+        fields:
+        - ssh-tunnel
     - advanced-options-start
     - merge:
       - additional-options
@@ -46,4 +71,4 @@ init:
   - step: load-namespace
     namespace: metabase.driver.snowflake
   - step: register-jdbc-driver
-    class: net.snowflake.client.jdbc.SnowflakeDriver
+    class: net.snowflake.client.api.driver.SnowflakeDriver

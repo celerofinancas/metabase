@@ -1,16 +1,18 @@
 /* eslint "react/prop-types": "warn" */
-import React, { Component } from "react";
+import cx from "classnames";
 import PropTypes from "prop-types";
-import { connect } from "react-redux";
+import { Component } from "react";
 
-import DatabaseSidebar from "./DatabaseSidebar";
-import SidebarLayout from "metabase/components/SidebarLayout";
-import DatabaseDetail from "metabase/reference/databases/DatabaseDetail";
-
+import { SidebarLayout } from "metabase/common/components/SidebarLayout";
+import CS from "metabase/css/core/index.css";
 import * as metadataActions from "metabase/redux/metadata";
+import DatabaseDetail from "metabase/reference/databases/DatabaseDetail";
 import * as actions from "metabase/reference/reference";
+import { connect } from "metabase/utils/redux";
 
 import { getDatabase, getDatabaseId, getIsEditing } from "../selectors";
+
+import DatabaseSidebar from "./DatabaseSidebar";
 
 const mapStateToProps = (state, props) => ({
   database: getDatabase(state, props),
@@ -23,8 +25,7 @@ const mapDispatchToProps = {
   ...actions,
 };
 
-@connect(mapStateToProps, mapDispatchToProps)
-export default class DatabaseDetailContainer extends Component {
+class DatabaseDetailContainer extends Component {
   static propTypes = {
     params: PropTypes.object.isRequired,
     location: PropTypes.object.isRequired,
@@ -57,7 +58,7 @@ export default class DatabaseDetailContainer extends Component {
 
     return (
       <SidebarLayout
-        className="flex-full relative"
+        className={cx(CS.flexFull, CS.relative)}
         style={isEditing ? { paddingTop: "43px" } : {}}
         sidebar={<DatabaseSidebar database={database} />}
       >
@@ -66,3 +67,9 @@ export default class DatabaseDetailContainer extends Component {
     );
   }
 }
+
+// eslint-disable-next-line import/no-default-export -- deprecated usage
+export default connect(
+  mapStateToProps,
+  mapDispatchToProps,
+)(DatabaseDetailContainer);

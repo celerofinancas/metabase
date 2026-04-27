@@ -1,148 +1,90 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import type { Location } from "history";
+import { useCallback } from "react";
+import { replace } from "react-router-redux";
 import { t } from "ttag";
-import { getIn } from "icepick";
-import Settings from "metabase/lib/settings";
-import Users from "metabase/entities/users";
-import Link from "metabase/components/Link";
-import AuthLayout from "../../containers/AuthLayout";
-import { ResetPasswordData } from "../../types";
-import {
-  FormMessage,
-  FormTitle,
-  InfoBody,
-  InfoIcon,
-  InfoIconContainer,
-  InfoMessage,
-  InfoTitle,
-} from "./ResetPassword.styled";
 
-type ViewType = "none" | "form" | "success" | "expired";
+import { useGetPasswordResetTokenStatusQuery } from "metabase/api";
+import { Button } from "metabase/common/components/Button";
+import { Link } from "metabase/common/components/Link";
+import { useToast } from "metabase/common/hooks/use-toast";
+import { useDispatch } from "metabase/utils/redux";
 
-export interface ResetPasswordProps {
+import { resetPassword, validatePassword } from "../../actions";
+import type { ResetPasswordData } from "../../types";
+import { AuthLayout } from "../AuthLayout";
+import { ResetPasswordForm } from "../ResetPasswordForm";
+
+import { InfoBody, InfoMessage, InfoTitle } from "./ResetPassword.styled";
+
+interface ResetPasswordQueryParams {
   token: string;
-  onResetPassword: (token: string, password: string) => void;
-  onValidatePassword: (password: string) => void;
-  onValidatePasswordToken: (token: string) => void;
+  email?: string;
 }
 
-const ResetPassword = ({
-  token,
-  onResetPassword,
-  onValidatePassword,
-  onValidatePasswordToken,
+interface ResetPasswordProps {
+  params: ResetPasswordQueryParams;
+  location?: Location<{ redirect?: string; email?: string }>;
+}
+
+export const ResetPassword = ({
+  params,
+  location,
 }: ResetPasswordProps): JSX.Element | null => {
-  const [view, setView] = useState<ViewType>("none");
-
-  const handleLoad = useCallback(async () => {
-    try {
-      await onValidatePasswordToken(token);
-      setView("form");
-    } catch (error) {
-      setView("expired");
-    }
-  }, [token, onValidatePasswordToken]);
-
-  const handlePasswordChange = useCallback(
-    async ({ password }: ResetPasswordData) => {
-      try {
-        await onValidatePassword(password);
-        return {};
-      } catch (error) {
-        return getPasswordError(error);
-      }
-    },
-    [onValidatePassword],
-  );
+  const { token } = params;
+  const redirectUrl = location?.query?.redirect;
+  const email = location?.query?.email;
+  const dispatch = useDispatch();
+  const [sendToast] = useToast();
+  const { data: status, isLoading } =
+    useGetPasswordResetTokenStatusQuery(token);
 
   const handlePasswordSubmit = useCallback(
     async ({ password }: ResetPasswordData) => {
-      await onResetPassword(token, password);
-      setView("success");
+      await dispatch(resetPassword({ token, password })).unwrap();
+      dispatch(replace(redirectUrl || "/"));
+      sendToast({ message: t`You've updated your password.` });
     },
-    [token, onResetPassword],
+    [token, dispatch, redirectUrl, sendToast],
   );
 
-  useEffect(() => {
-    handleLoad();
-  }, [handleLoad]);
+  if (isLoading) {
+    return <AuthLayout />;
+  }
 
   return (
     <AuthLayout>
-      {view === "form" && (
+      {status?.valid ? (
         <ResetPasswordForm
-          onPasswordChange={handlePasswordChange}
+          onValidatePassword={validatePassword}
           onSubmit={handlePasswordSubmit}
         />
+      ) : (
+        <ResetPasswordExpired email={email} />
       )}
-      {view === "success" && <ResetPasswordSuccess />}
-      {view === "expired" && <ResetPasswordExpired />}
     </AuthLayout>
   );
 };
 
-interface ResetPasswordFormProps {
-  onPasswordChange: (data: ResetPasswordData) => void;
-  onSubmit: (data: ResetPasswordData) => void;
+interface ResetPasswordExpiredProps {
+  email?: string;
 }
 
-const ResetPasswordForm = ({
-  onPasswordChange,
-  onSubmit,
-}: ResetPasswordFormProps): JSX.Element => {
-  const passwordDescription = useMemo(
-    () => Settings.passwordComplexityDescription(),
-    [],
-  );
+const ResetPasswordExpired = ({
+  email,
+}: ResetPasswordExpiredProps): JSX.Element => {
+  const forgotPasswordUrl = email
+    ? `/auth/forgot_password?email=${encodeURIComponent(email)}`
+    : "/auth/forgot_password";
 
-  return (
-    <div>
-      <FormTitle>{t`New password`}</FormTitle>
-      <FormMessage>{t`To keep your data secure, passwords ${passwordDescription}`}</FormMessage>
-      <Users.Form
-        form={Users.forms.password_reset}
-        asyncValidate={onPasswordChange}
-        asyncBlurFields={["password"]}
-        submitTitle={t`Save new password`}
-        submitFullWidth
-        onSubmit={onSubmit}
-      />
-    </div>
-  );
-};
-
-const ResetPasswordSuccess = (): JSX.Element => {
-  return (
-    <InfoBody>
-      <InfoIconContainer>
-        <InfoIcon name="check" />
-      </InfoIconContainer>
-      <InfoTitle>{t`All done!`}</InfoTitle>
-      <InfoMessage>{t`Awesome, you've successfully updated your password.`}</InfoMessage>
-      <Link
-        className="Button Button--primary"
-        to={"/"}
-      >{t`Sign in with your new password`}</Link>
-    </InfoBody>
-  );
-};
-
-const ResetPasswordExpired = (): JSX.Element => {
   return (
     <InfoBody>
       <InfoTitle>{t`Whoops, that's an expired link`}</InfoTitle>
       <InfoMessage>
         {t`For security reasons, password reset links expire after a little while. If you still need to reset your password, you can request a new reset email.`}
       </InfoMessage>
-      <Link
-        className="Button Button--primary"
-        to={"/auth/forgot_password"}
-      >{t`Request a new reset email`}</Link>
+      <Button as={Link} primary to={forgotPasswordUrl}>
+        {t`Request a new reset email`}
+      </Button>
     </InfoBody>
   );
 };
-
-const getPasswordError = (error: unknown) => {
-  return getIn(error, ["data", "errors"]);
-};
-
-export default ResetPassword;

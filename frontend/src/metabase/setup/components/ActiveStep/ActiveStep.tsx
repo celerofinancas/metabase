@@ -1,31 +1,47 @@
-import React, { ReactNode } from "react";
+import type { ReactNode } from "react";
+
+import { getShouldShowStepNumber } from "metabase/setup";
+import { useSelector } from "metabase/utils/redux";
+
 import {
-  StepRoot,
-  StepTitle,
   StepLabel,
   StepLabelText,
+  StepRoot,
+  StepTitle,
 } from "./ActiveStep.styled";
 
-export interface ActiveStepProps {
+interface ActiveStepProps {
   title: string;
   label: number;
   children?: ReactNode;
+  className?: string;
 }
 
-const ActiveStep = ({
+export const ActiveStep = ({
   title,
   label,
   children,
+  className,
 }: ActiveStepProps): JSX.Element => {
+  const shouldShowStepNumber = useSelector(getShouldShowStepNumber);
+
   return (
-    <StepRoot>
+    <StepRoot
+      role="listitem"
+      aria-label={title}
+      aria-current="step"
+      data-testid="setup-step"
+      className={className}
+    >
       <StepTitle>{title}</StepTitle>
-      <StepLabel>
-        <StepLabelText>{label}</StepLabelText>
-      </StepLabel>
+
+      {shouldShowStepNumber && (
+        <StepLabel data-testid="step-number">
+          <StepLabelText>{label}</StepLabelText>
+        </StepLabel>
+      )}
+
       {children}
     </StepRoot>
   );
 };
-
-export default ActiveStep;

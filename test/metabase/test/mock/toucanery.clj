@@ -1,59 +1,98 @@
 (ns metabase.test.mock.toucanery
   "A document style database mocked for testing. This is a dynamic schema db with `:nested-fields`. Most notably meant
   to serve as a representation of a Mongo database."
-  (:require [medley.core :as m]
-            [metabase.driver :as driver]
-            [metabase.test.mock.util :as mock-util]))
+  (:require
+   [medley.core :as m]
+   [metabase.driver :as driver]
+   [metabase.test.mock.util :as mock.util]))
 
 (def toucanery-tables
   {"transactions" {:name   "transactions"
                    :schema nil
-                   :fields #{{:name          "id"
-                              :pk?           true
-                              :database-type "SERIAL"
-                              :base-type     :type/Integer}
-                             {:name          "ts"
-                              :database-type "BIGINT"
-                              :base-type     :type/BigInteger
-                              :effective-type :type/DateTime
-                              :coercion-strategy :Coercion/UNIXMilliSeconds->DateTime}
-                             {:name          "toucan"
-                              :database-type "OBJECT"
-                              :base-type     :type/Dictionary
-                              :nested-fields #{{:name          "name"
-                                                :database-type "VARCHAR"
-                                                :base-type     :type/Text}
-                                               {:name          "details"
-                                                :database-type "OBJECT"
-                                                :base-type     :type/Dictionary
-                                                :nested-fields #{{:name          "age"
-                                                                  :database-type "INT"
-                                                                  :base-type     :type/Integer}
-                                                                 {:name          "weight"
-                                                                  :database-type "DECIMAL"
-                                                                  :semantic-type :type/Category
-                                                                  :base-type     :type/Decimal}}}}}
-                             {:name          "buyer"
-                              :database-type "OBJECT"
-                              :base-type     :type/Dictionary
-                              :nested-fields #{{:name          "name"
-                                                :database-type "VARCHAR"
-                                                :base-type     :type/Text}
-                                               {:name          "cc"
-                                                :database-type "VARCHAR"
-                                                :base-type     :type/Text}}}}}
+                   :fields #{{:name                       "id"
+                              :pk?                        true
+                              :database-type              "SERIAL"
+                              :base-type                  :type/Integer
+                              :json-unfolding             false
+                              :database-is-auto-increment true}
+                             {:name                       "ts"
+                              :pk?                        false
+                              :database-type              "BIGINT"
+                              :base-type                  :type/BigInteger
+                              :effective-type             :type/DateTime
+                              :coercion-strategy          :Coercion/UNIXMilliSeconds->DateTime
+                              :json-unfolding             false
+                              :database-is-auto-increment false}
+                             {:name                       "toucan"
+                              :pk?                        false
+                              :database-type              "OBJECT"
+                              :base-type                  :type/Dictionary
+                              :json-unfolding             false
+                              :database-is-auto-increment false
+                              :nested-fields              #{{:name                       "name"
+                                                             :pk?                        false
+                                                             :database-type              "VARCHAR"
+                                                             :base-type                  :type/Text
+                                                             :json-unfolding             false
+                                                             :database-is-auto-increment false}
+                                                            {:name                       "details"
+                                                             :pk?                        false
+                                                             :database-type              "OBJECT"
+                                                             :base-type                  :type/Dictionary
+                                                             :json-unfolding             false
+                                                             :database-is-auto-increment false
+                                                             :nested-fields              #{{:name                       "age"
+                                                                                            :pk?                        false
+                                                                                            :database-type              "INT"
+                                                                                            :database-is-auto-increment false
+                                                                                            :json-unfolding             false
+                                                                                            :base-type                  :type/Integer}
+                                                                                           {:name                       "weight"
+                                                                                            :pk?                        false
+                                                                                            :database-type              "DECIMAL"
+                                                                                            :database-is-auto-increment false
+                                                                                            :json-unfolding             false
+                                                                                            :semantic-type              :type/Category
+                                                                                            :base-type                  :type/Decimal}}}}}
+                             {:name           "buyer"
+                              :pk?            false
+                              :database-type  "OBJECT"
+                              :database-is-auto-increment false
+                              :json-unfolding false
+                              :base-type      :type/Dictionary
+                              :nested-fields  #{{:name                       "name"
+                                                 :pk?                        false
+                                                 :database-type              "VARCHAR"
+                                                 :json-unfolding             false
+                                                 :base-type                  :type/Text
+                                                 :database-is-auto-increment false}
+                                                {:name                       "cc"
+                                                 :pk?                        false
+                                                 :database-type              "VARCHAR"
+                                                 :json-unfolding             false
+                                                 :base-type                  :type/Text
+                                                 :database-is-auto-increment false}}}}}
    "employees"    {:name   "employees"
                    :schema nil
-                   :fields #{{:name          "id"
-                              :database-type "SERIAL"
-                              :base-type     :type/Integer}
-                             {:name          "name"
-                              :database-type "VARCHAR"
-                              :base-type     :type/Text}}}})
+                   :fields #{{:name                       "id"
+                              :pk?                        false
+                              :database-type              "SERIAL"
+                              :json-unfolding             false
+                              :database-is-auto-increment true
+                              :base-type                  :type/Integer}
+                             {:name                       "name"
+                              :pk?                        false
+                              :database-type              "VARCHAR"
+                              :json-unfolding             false
+                              :database-is-auto-increment false
+                              :base-type                  :type/Text}}}})
 
 (driver/register! ::toucanery, :abstract? true)
 
-(defmethod driver/describe-database ::toucanery
+(defmethod driver/database-supports? [::toucanery :nested-fields] [_driver _feature _database] true)
+(defmethod driver/database-supports? [::toucanery :schemas] [_driver _feature _database] false)
+
+(defmethod driver/describe-database* ::toucanery
   [_ {:keys [exclude-tables]}]
   (let [tables (for [table (vals toucanery-tables)
                      :when (not (contains? exclude-tables (:name table)))]
@@ -78,91 +117,90 @@
     [{:keypath "movies.filming.description", :value "If the movie is currently being filmed."}
      {:keypath "movies.description", :value "A cinematic adventure."}]))
 
-(defmethod driver/supports? [::toucanery :nested-fields]
-  [_ _]
-  true)
-
 (defmethod driver/mbql->native ::toucanery
-  [_ query]
-  query)
+  [_ _query]
+  {:query "SQL string"})
 
 (defmethod driver/execute-reducible-query ::toucanery
   [_ query _ respond]
-  (mock-util/mock-execute-reducible-query query respond))
+  (mock.util/mock-execute-reducible-query query respond))
 
 (def toucanery-tables-and-fields
-  [(merge mock-util/table-defaults
+  [(merge mock.util/table-defaults
           {:name         "employees"
-           :fields       [(merge mock-util/field-defaults
-                                 {:name          "name"
-                                  :display_name  "Name"
-                                  :database_type "VARCHAR"
-                                  :base_type     :type/Text
-                                  :semantic_type :type/Name})
-                          (merge mock-util/field-defaults
-                                 {:name          "id"
-                                  :display_name  "ID"
-                                  :database_type "SERIAL"
-                                  :base_type     :type/Integer
-                                  :semantic_type :type/PK})]
+           :fields       [(merge mock.util/field-defaults
+                                 {:name                       "name"
+                                  :display_name               "Name"
+                                  :database_type              "VARCHAR"
+                                  :base_type                  :type/Text
+                                  :semantic_type              :type/Name})
+                          (merge mock.util/field-defaults
+                                 {:name                       "id"
+                                  :display_name               "ID"
+                                  :database_type              "SERIAL"
+                                  :base_type                  :type/Integer
+                                  :database_is_auto_increment true
+                                  :database_is_pk             true
+                                  :semantic_type              :type/PK})]
            :display_name "Employees"})
-   (merge mock-util/table-defaults
+   (merge mock.util/table-defaults
           {:name         "transactions"
-           :fields       [(merge mock-util/field-defaults
+           :fields       [(merge mock.util/field-defaults
                                  {:name          "ts"
                                   :display_name  "Ts"
                                   :database_type "BIGINT"
                                   :base_type     :type/BigInteger
                                   :effective_type :type/DateTime
                                   :coercion_strategy :Coercion/UNIXMilliSeconds->DateTime})
-                          (merge mock-util/field-defaults
+                          (merge mock.util/field-defaults
                                  {:name          "id"
                                   :display_name  "ID"
                                   :database_type "SERIAL"
+                                  :database_is_auto_increment true
                                   :base_type     :type/Integer})
-                          (merge mock-util/field-defaults
+                          (merge mock.util/field-defaults
                                  {:name          "buyer"
                                   :display_name  "Buyer"
                                   :database_type "OBJECT"
                                   :base_type     :type/Dictionary})
-                          (merge mock-util/field-defaults
+                          (merge mock.util/field-defaults
                                  {:name          "cc"
                                   :display_name  "Cc"
                                   :database_type "VARCHAR"
                                   :base_type     :type/Text
                                   :parent_id     true})
-                          (merge mock-util/field-defaults
+                          (merge mock.util/field-defaults
                                  {:name          "name"
                                   :display_name  "Name"
                                   :database_type "VARCHAR"
                                   :base_type     :type/Text
                                   :parent_id     true
                                   :semantic_type :type/Name})
-                          (merge mock-util/field-defaults
+                          (merge mock.util/field-defaults
                                  {:name          "age"
                                   :display_name  "Age"
                                   :database_type "INT"
                                   :base_type     :type/Integer
                                   :parent_id     true})
-                          (merge mock-util/field-defaults
+                          (merge mock.util/field-defaults
                                  {:name          "details"
                                   :display_name  "Details"
                                   :database_type "OBJECT"
                                   :base_type     :type/Dictionary
                                   :parent_id     true})
-                          (merge mock-util/field-defaults
+                          (merge mock.util/field-defaults
                                  {:name          "name"
                                   :display_name  "Name"
                                   :database_type "VARCHAR"
                                   :base_type     :type/Text
                                   :parent_id     true
                                   :semantic_type :type/Name})
-                          (merge mock-util/field-defaults
+                          (merge mock.util/field-defaults
                                  {:name          "toucan"
                                   :display_name  "Toucan"
                                   :database_type "OBJECT"
                                   :base_type     :type/Dictionary})
-                          (merge mock-util/field-defaults
+                          (merge mock.util/field-defaults
                                  {:name          "weight"
                                   :display_name  "Weight"
                                   :database_type "DECIMAL"

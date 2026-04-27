@@ -1,68 +1,59 @@
-import React, { useCallback, useRef } from "react";
+import cx from "classnames";
+import { useField } from "formik";
+import { useCallback, useMemo, useRef } from "react";
 import { t } from "ttag";
-import _ from "underscore";
 
-import { isVirtualCardId } from "metabase/lib/saved-questions";
+import { useGetFieldQuery } from "metabase/api";
+import { SelectButton } from "metabase/common/components/SelectButton";
+import CS from "metabase/css/core/index.css";
 import { SchemaTableAndFieldDataSelector } from "metabase/query_builder/components/DataSelector";
+import { Text } from "metabase/ui";
+import Field from "metabase-lib/v1/metadata/Field";
+import { isVirtualCardId } from "metabase-lib/v1/metadata/utils/saved-questions";
+import type { FieldId } from "metabase-types/api";
 
-import Field from "metabase-lib/lib/metadata/Field";
-import Fields from "metabase/entities/fields";
+import MappedFieldPickerS from "./MappedFieldPicker.module.css";
 
-import SelectButton from "metabase/core/components/SelectButton";
-
-type CollapsedPickerProps = {
-  isTriggeredComponentOpen: boolean;
-  open: () => void;
-  close: () => void;
-};
-
-type MappedFieldPickerOwnProps = {
-  field: {
-    value: number | null;
-    onChange: (fieldId: number) => void;
-  };
-  formField: {
-    databaseId: number;
-  };
-  fieldObject?: Field;
+type MappedFieldPickerProps = {
+  name: string;
+  className?: string;
+  databaseId: number | null;
   tabIndex?: number;
+  label: string;
+  onChange: (value: FieldId | null) => void;
 };
 
-type MappedFieldPickerStateProps = {
-  fieldObject?: Field;
-};
-
-type MappedFieldPickerProps = MappedFieldPickerOwnProps &
-  MappedFieldPickerStateProps;
-
-const query = {
-  id: (state: unknown, { field }: MappedFieldPickerOwnProps) =>
-    field.value || null,
-
-  // When using Field object loader, it passes the field object as a `field` prop
-  // and overwrites form's `field` prop. Entity alias makes it pass the `fieldObject` prop instead
-  entityAlias: "fieldObject",
-
-  loadingAndErrorWrapper: false,
-};
-
-function MappedFieldPicker({
-  field,
-  formField,
-  fieldObject,
+export function MappedFieldPicker({
+  className,
+  databaseId = null,
+  onChange,
+  name,
   tabIndex,
+  label,
 }: MappedFieldPickerProps) {
-  const { value: selectedFieldId = null, onChange } = field;
-  const { databaseId = null } = formField;
+  const [{ value: selectedFieldId = null }] = useField(name);
 
-  const selectButtonRef = useRef<HTMLDivElement>();
+  const { data: field = null } = useGetFieldQuery(
+    {
+      id: selectedFieldId,
+    },
+    { skip: selectedFieldId === null },
+  );
+
+  const fieldObject = useMemo(() => {
+    return field && selectedFieldId ? new Field(field) : null;
+  }, [field, selectedFieldId]);
+
+  const selectButtonRef = useRef<HTMLButtonElement>();
 
   const focusSelectButton = useCallback(() => {
     selectButtonRef.current?.focus();
   }, []);
 
   const onFieldChange = useCallback(
-    fieldId => {
+    (fieldId: FieldId) => {
+      // use onChange instead of setValue because this value gets passed to a parent
+      // component which adjusts the rest of the fields values.
       onChange(fieldId);
       selectButtonRef.current?.focus();
     },
@@ -70,19 +61,32 @@ function MappedFieldPicker({
   );
 
   const renderTriggerElement = useCallback(() => {
-    const label = fieldObject
-      ? fieldObject.displayName({ includeTable: true })
-      : t`None`;
+    const label = fieldObject?.display_name || t`None`;
+    const tableName = fieldObject?.table?.display_name;
+
     return (
       <SelectButton
+        classNames={{
+          root: cx(
+            MappedFieldPickerS.StyledSelectButton,
+            {
+              [MappedFieldPickerS.hasValue]: fieldObject,
+            },
+            className,
+          ),
+          icon: MappedFieldPickerS.StyledSelectIcon,
+        }}
         hasValue={!!fieldObject}
         tabIndex={tabIndex}
-        ref={selectButtonRef}
+        ref={selectButtonRef as any}
+        onClear={() => onChange(null)}
       >
-        {label}
+        <span className={MappedFieldPickerS.StyledSelectButtonContent}>
+          {`${tableName ? `${tableName} → ` : ""}${label}`}
+        </span>
       </SelectButton>
     );
-  }, [fieldObject, tabIndex]);
+  }, [className, fieldObject, onChange, tabIndex]);
 
   // DataSelector doesn't handle selectedTableId change prop nicely.
   // During the initial load, fieldObject might have `table_id` set to `card__$ID` (retrieved from metadata)
@@ -95,18 +99,28 @@ function MappedFieldPicker({
       : fieldObject?.table?.id;
 
   return (
-    <SchemaTableAndFieldDataSelector
-      className="flex flex-full justify-center align-center"
-      selectedDatabaseId={databaseId}
-      selectedTableId={selectedTableId}
-      selectedSchemaId={fieldObject?.table?.schema?.id}
-      selectedFieldId={selectedFieldId}
-      getTriggerElementContent={renderTriggerElement}
-      hasTriggerExpandControl={false}
-      triggerTabIndex={tabIndex}
-      setFieldFn={onFieldChange}
-      onClose={focusSelectButton}
-    />
+    <>
+      <Text fw="bold" c="text-secondary">
+        {label}
+      </Text>
+      <SchemaTableAndFieldDataSelector
+        className={cx(
+          CS.flex,
+          CS.flexFull,
+          CS.flexBasisNone,
+          CS.justifyCenter,
+          CS.alignCenter,
+        )}
+        selectedDatabaseId={databaseId}
+        selectedTableId={selectedTableId}
+        selectedSchemaId={fieldObject?.table?.schema?.id}
+        selectedFieldId={selectedFieldId}
+        getTriggerElementContent={renderTriggerElement}
+        hasTriggerExpandControl={false}
+        triggerTabIndex={tabIndex}
+        setFieldFn={onFieldChange}
+        onClose={focusSelectButton}
+      />
+    </>
   );
 }
-export default Fields.load(query)(MappedFieldPicker);

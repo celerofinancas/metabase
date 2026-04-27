@@ -1,43 +1,18 @@
-import { createSelector } from "reselect";
-import { assoc, getIn } from "icepick";
+import { createSelector } from "@reduxjs/toolkit";
+import { getIn } from "icepick";
 
-import Dashboards from "metabase/entities/dashboards";
-
-import * as Query from "metabase/lib/query/query";
-import * as Filter from "metabase/lib/query/filter";
-import * as Aggregation from "metabase/lib/query/aggregation";
-
-import { resourceListToMap } from "metabase/lib/redux";
-
-import { idsToObjectMap, databaseToForeignKeys } from "./utils";
-
-// import { getDatabases, getTables, getFields, getMetrics, getSegments } from "metabase/selectors/metadata";
-
+import { Dashboards } from "metabase/entities/dashboards";
 import {
   getShallowDatabases as getDatabases,
-  getShallowTables as getTables,
   getShallowFields as getFields,
-  getShallowMetrics as getMetrics,
   getShallowSegments as getSegments,
-} from "metabase/selectors/metadata";
-export {
-  getShallowDatabases as getDatabases,
   getShallowTables as getTables,
-  getShallowFields as getFields,
-  getShallowMetrics as getMetrics,
-  getShallowSegments as getSegments,
 } from "metabase/selectors/metadata";
+import { resourceListToMap } from "metabase/utils/redux";
 
-import _ from "underscore";
+import { idsToObjectMap } from "./utils";
 
 export const getUser = (state, props) => state.currentUser;
-
-export const getMetricId = (state, props) =>
-  Number.parseInt(props.params.metricId);
-export const getMetric = createSelector(
-  [getMetricId, getMetrics],
-  (metricId, metrics) => metrics[metricId] || { id: metricId },
-);
 
 export const getSegmentId = (state, props) =>
   Number.parseInt(props.params.segmentId);
@@ -69,28 +44,14 @@ export const getTableBySegment = createSelector(
   (segment, tables) =>
     segment && segment.table_id ? tables[segment.table_id] : {},
 );
-const getTableByMetric = createSelector(
-  [getMetric, getTables],
-  (metric, tables) =>
-    metric && metric.table_id ? tables[metric.table_id] : {},
-);
 export const getTable = createSelector(
-  [
-    getTableId,
-    getTables,
-    getMetricId,
-    getTableByMetric,
-    getSegmentId,
-    getTableBySegment,
-  ],
-  (tableId, tables, metricId, tableByMetric, segmentId, tableBySegment) =>
+  [getTableId, getTables, getSegmentId, getTableBySegment],
+  (tableId, tables, segmentId, tableBySegment) =>
     tableId
       ? tables[tableId] || { id: tableId }
-      : metricId
-      ? tableByMetric
       : segmentId
-      ? tableBySegment
-      : {},
+        ? tableBySegment
+        : {},
 );
 
 export const getFieldId = (state, props) =>
@@ -117,77 +78,19 @@ export const getFieldBySegment = createSelector(
 const getQuestions = (state, props) =>
   getIn(state, ["entities", "questions"]) || {};
 
-export const getMetricQuestions = createSelector(
-  [getMetricId, getQuestions],
-  (metricId, questions) =>
-    Object.values(questions)
-      .filter(
-        question =>
-          question.dataset_query.type === "query" &&
-          _.any(
-            Query.getAggregations(question.dataset_query.query),
-            aggregation => Aggregation.getMetric(aggregation) === metricId,
-          ),
-      )
-      .reduce((map, question) => assoc(map, question.id, question), {}),
-);
-
 const getRevisions = (state, props) => state.revisions;
-
-export const getMetricRevisions = createSelector(
-  [getMetricId, getRevisions],
-  (metricId, revisions) => getIn(revisions, ["metric", metricId]) || {},
-);
 
 export const getSegmentRevisions = createSelector(
   [getSegmentId, getRevisions],
   (segmentId, revisions) => getIn(revisions, ["segment", segmentId]) || {},
 );
 
-export const getSegmentQuestions = createSelector(
-  [getSegmentId, getQuestions],
-  (segmentId, questions) =>
-    Object.values(questions)
-      .filter(
-        question =>
-          question.dataset_query.type === "query" &&
-          Query.getFilters(question.dataset_query.query).some(
-            filter => Filter.isSegment(filter) && filter[1] === segmentId,
-          ),
-      )
-      .reduce((map, question) => assoc(map, question.id, question), {}),
-);
-
 export const getTableQuestions = createSelector(
   [getTable, getQuestions],
   (table, questions) =>
-    Object.values(questions).filter(question => question.table_id === table.id),
-);
-
-const getDatabaseBySegment = createSelector(
-  [getSegment, getTables, getDatabases],
-  (segment, tables, databases) =>
-    (segment &&
-      segment.table_id &&
-      tables[segment.table_id] &&
-      databases[tables[segment.table_id].db_id]) ||
-    {},
-);
-
-const getForeignKeysBySegment = createSelector(
-  [getDatabaseBySegment],
-  databaseToForeignKeys,
-);
-
-const getForeignKeysByDatabase = createSelector(
-  [getDatabase],
-  databaseToForeignKeys,
-);
-
-export const getForeignKeys = createSelector(
-  [getSegmentId, getForeignKeysBySegment, getForeignKeysByDatabase],
-  (segmentId, foreignKeysBySegment, foreignKeysByDatabase) =>
-    segmentId ? foreignKeysBySegment : foreignKeysByDatabase,
+    Object.values(questions).filter(
+      (question) => question.table_id === table.id,
+    ),
 );
 
 export const getLoading = (state, props) => state.reference.isLoading;
@@ -196,7 +99,7 @@ export const getError = (state, props) => state.reference.error;
 
 export const getHasSingleSchema = createSelector(
   [getTablesByDatabase],
-  tables =>
+  (tables) =>
     tables && Object.keys(tables).length > 0
       ? Object.values(tables).every(
           (table, index, tables) => table.schema_name === tables[0].schema,
@@ -213,6 +116,3 @@ export const getDashboards = (state, props) => {
   const list = Dashboards.selectors.getList(state);
   return list && resourceListToMap(list);
 };
-
-export const getIsDashboardModalOpen = (state, props) =>
-  state.reference.isDashboardModalOpen;

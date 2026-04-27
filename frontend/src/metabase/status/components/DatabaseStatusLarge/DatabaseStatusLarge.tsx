@@ -1,103 +1,40 @@
+import { t } from "ttag";
+
 import {
   isSyncAborted,
   isSyncCompleted,
   isSyncInProgress,
-} from "metabase/lib/syncing";
-import React from "react";
-import { t } from "ttag";
-import { Database } from "metabase-types/api";
-import Icon from "../../../components/Icon";
-import {
-  StatusCardRoot,
-  StatusCardIcon,
-  StatusCardBody,
-  StatusCardTitle,
-  StatusCardDescription,
-  StatusCardSpinner,
-  StatusCardIconContainer,
-  StatusRoot,
-  StatusHeader,
-  StatusTitle,
-  StatusToggle,
-  StatusBody,
-} from "./DatabaseStatusLarge.styled";
-import Ellipsified from "metabase/components/Ellipsified";
-import useStatusVisibility from "../../hooks/use-status-visibility";
+} from "metabase/utils/syncing";
+import type { Database } from "metabase-types/api";
 
-export interface DatabaseStatusLargeProps {
+import StatusLarge from "../StatusLarge";
+
+export type DatabaseStatusLargeProps = {
   databases: Database[];
   isActive?: boolean;
   onCollapse?: () => void;
-}
-
-const DatabaseStatusLarge = ({
-  databases,
-  isActive,
-  onCollapse,
-}: DatabaseStatusLargeProps): JSX.Element => {
-  return (
-    <StatusRoot role="status">
-      <StatusHeader>
-        <StatusTitle>{getTitle(databases)}</StatusTitle>
-        <StatusToggle onClick={onCollapse}>
-          <Icon name="chevrondown" />
-        </StatusToggle>
-      </StatusHeader>
-      <StatusBody>
-        {databases.map(database => (
-          <StatusCard
-            key={database.id}
-            database={database}
-            isActive={isActive}
-          />
-        ))}
-      </StatusBody>
-    </StatusRoot>
-  );
 };
 
-interface StatusCardProps {
-  database: Database;
-  isActive?: boolean;
-}
-
-const StatusCard = ({
-  database,
+export const DatabaseStatusLarge = ({
+  databases,
+  onCollapse,
   isActive,
-}: StatusCardProps): JSX.Element | null => {
-  const isVisible = useStatusVisibility(isActive || isSyncInProgress(database));
-
-  if (!isVisible) {
-    return null;
-  }
+}: DatabaseStatusLargeProps) => {
+  const status = {
+    title: getTitle(databases),
+    items: databases.map((database) => ({
+      id: database.id,
+      title: database.name,
+      icon: "database",
+      description: getDescription(database),
+      isInProgress: isSyncInProgress(database),
+      isCompleted: isSyncCompleted(database),
+      isAborted: isSyncAborted(database),
+    })),
+  };
 
   return (
-    <StatusCardRoot key={database.id}>
-      <StatusCardIcon>
-        <Icon name="database" />
-      </StatusCardIcon>
-      <StatusCardBody>
-        <StatusCardTitle>
-          <Ellipsified>{database.name}</Ellipsified>
-        </StatusCardTitle>
-        <StatusCardDescription>
-          {getDescription(database)}
-        </StatusCardDescription>
-      </StatusCardBody>
-      {isSyncInProgress(database) && (
-        <StatusCardSpinner size={24} borderWidth={3} />
-      )}
-      {isSyncCompleted(database) && (
-        <StatusCardIconContainer>
-          <Icon name="check" size={12} />
-        </StatusCardIconContainer>
-      )}
-      {isSyncAborted(database) && (
-        <StatusCardIconContainer isError={true}>
-          <Icon name="warning" size={12} />
-        </StatusCardIconContainer>
-      )}
-    </StatusCardRoot>
+    <StatusLarge status={status} onCollapse={onCollapse} isActive={isActive} />
   );
 };
 
@@ -126,5 +63,3 @@ const getDescription = (database: Database): string => {
     return t`Syncing tables…`;
   }
 };
-
-export default DatabaseStatusLarge;

@@ -1,1 +1,1 @@
-export { default } from "./DatabaseStatusLarge";
+export * from "./DatabaseStatusLarge";

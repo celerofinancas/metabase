@@ -1,1 +1,1 @@
-export { default } from "./MappedFieldPicker";
+export { MappedFieldPicker } from "./MappedFieldPicker";

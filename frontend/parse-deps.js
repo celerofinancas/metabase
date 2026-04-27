@@ -1,16 +1,17 @@
 #!/usr/bin/env node
 
+/* eslint-disable import/no-commonjs, no-undef, no-console */
 const fs = require("fs");
 const path = require("path");
+const readline = require("readline");
 
+const babel = require("@babel/core");
 const glob = require("glob");
 const minimatch = require("minimatch");
-const babel = require("@babel/core");
-const readline = require("readline");
 
 const PATTERN = "{enterprise/,}frontend/src/**/*.{js,jsx,ts,tsx}";
 
-// after webpack.config.js
+// after rspack.main.config.js
 const ALIAS = {
   metabase: "frontend/src/metabase",
   "metabase-lib": "frontend/src/metabase-lib",
@@ -23,7 +24,7 @@ function files() {
 }
 
 function dependencies() {
-  const deps = files().map(filename => {
+  const deps = files().map((filename) => {
     const contents = fs.readFileSync(filename, "utf-8");
 
     const importList = [];
@@ -54,11 +55,10 @@ function dependencies() {
     } catch (e) {
       console.error(filename, e.toString());
       process.exit(-1);
-      n;
     }
     const base = path.dirname(filename) + path.sep;
     const absoluteImportList = importList
-      .map(name => {
+      .map((name) => {
         const absName = name[0] === "." ? path.normalize(base + name) : name;
         const parts = absName.split(path.sep);
         const realPath = ALIAS[parts[0]];
@@ -67,7 +67,7 @@ function dependencies() {
         return realName;
       })
       .map(getFilePathFromImportPath)
-      .filter(name => minimatch(name, PATTERN));
+      .filter((name) => minimatch(name, PATTERN));
 
     return { source: filename, dependencies: absoluteImportList.sort() };
   });
@@ -78,7 +78,7 @@ function getFilePathFromImportPath(name) {
   const scriptsExtensions = ["js", "ts"];
   const scriptsExtensionsWithJsx = [...scriptsExtensions, "jsx", "tsx"];
 
-  for (let extension of scriptsExtensionsWithJsx) {
+  for (const extension of scriptsExtensionsWithJsx) {
     const path = `${name}.${extension}`;
 
     if (fs.existsSync(path)) {
@@ -88,7 +88,7 @@ function getFilePathFromImportPath(name) {
 
   const isDirectory = fs.existsSync(name) && fs.lstatSync(name).isDirectory();
 
-  for (let extension of scriptsExtensions) {
+  for (const extension of scriptsExtensions) {
     const indexScriptPath = `${name}/index.${extension}`;
 
     if (isDirectory && fs.existsSync(indexScriptPath)) {
@@ -100,10 +100,10 @@ function getFilePathFromImportPath(name) {
 }
 
 function dependents() {
-  let dependents = {};
-  dependencies().forEach(dep => {
+  const dependents = {};
+  dependencies().forEach((dep) => {
     const { source, dependencies } = dep;
-    dependencies.forEach(d => {
+    dependencies.forEach((d) => {
       if (!dependents[d]) {
         dependents[d] = [];
       }
@@ -115,9 +115,9 @@ function dependents() {
 
 function getDependents(sources) {
   const allDependents = dependents();
-  let filteredDependents = [];
+  const filteredDependents = [];
 
-  sources.forEach(name => {
+  sources.forEach((name) => {
     const list = allDependents[name];
     if (list && Array.isArray(list) && list.length > 0) {
       filteredDependents.push(...list);
@@ -131,7 +131,7 @@ function filterDependents() {
   const rl = readline.createInterface({ input: process.stdin });
 
   const start = async () => {
-    let sources = [];
+    const sources = [];
     for await (const line of rl) {
       const name = line.trim();
       if (name.length > 0) {
@@ -148,21 +148,23 @@ function filterAllDependents() {
   const rl = readline.createInterface({ input: process.stdin });
 
   const start = async () => {
-    let sources = [];
+    const sources = [];
     for await (const line of rl) {
       const name = line.trim();
       if (name.length > 0) {
         sources.push(name);
       }
     }
-    let filteredDependents = getDependents(sources);
+    const filteredDependents = getDependents(sources);
 
     const allDependents = dependents();
     for (let i = 0; i < filteredDependents.length; ++i) {
       const name = filteredDependents[i];
       const list = allDependents[name];
       if (list && Array.isArray(list) && list.length > 0) {
-        const newAddition = list.filter(e => filteredDependents.indexOf(e) < 0);
+        const newAddition = list.filter(
+          (e) => filteredDependents.indexOf(e) < 0,
+        );
         filteredDependents.push(...newAddition);
       }
     }
@@ -174,7 +176,7 @@ function filterAllDependents() {
 function countDependents() {
   const allDependents = dependents();
   const sources = Object.keys(allDependents).sort();
-  const tally = sources.map(name => {
+  const tally = sources.map((name) => {
     return { name, count: allDependents[name].length };
   });
   console.log(tally.map(({ name, count }) => `${count} ${name}`).join("\n"));
@@ -183,12 +185,12 @@ function countDependents() {
 function countAllDependents() {
   const allDependents = dependents();
   const sources = Object.keys(allDependents).sort();
-  const tally = sources.map(name => {
+  const tally = sources.map((name) => {
     const list = allDependents[name];
     for (let i = 0; i < list.length; ++i) {
       const deps = allDependents[list[i]];
       if (deps && Array.isArray(deps) && deps.length > 1) {
-        const newAddition = deps.filter(e => list.indexOf(e) < 0);
+        const newAddition = deps.filter((e) => list.indexOf(e) < 0);
         list.push(...newAddition);
       }
     }
@@ -200,10 +202,10 @@ function countAllDependents() {
 function matrix() {
   const allDependents = dependents();
   const sources = Object.keys(allDependents).sort();
-  const width = Math.max(...sources.map(s => s.length));
-  const rows = sources.map(name => {
+  const width = Math.max(...sources.map((s) => s.length));
+  const rows = sources.map((name) => {
     const list = allDependents[name];
-    const checks = sources.map(dep => (list.indexOf(dep) < 0 ? " " : "x"));
+    const checks = sources.map((dep) => (list.indexOf(dep) < 0 ? " " : "x"));
     return name.padEnd(width) + " | " + checks.join("");
   });
   console.log(rows.join("\n"));
@@ -261,7 +263,7 @@ function main(args) {
   }
 }
 
-let args = process.argv;
+const args = process.argv;
 args.shift();
 args.shift();
 main(args);

@@ -1,1 +1,1 @@
-export { default } from "./DatasetMetadataStrengthIndicator";
+export { DatasetMetadataStrengthIndicator } from "./DatasetMetadataStrengthIndicator";

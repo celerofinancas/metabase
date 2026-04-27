@@ -1,35 +1,68 @@
 /* eslint-disable react/prop-types */
-import React from "react";
 import cx from "classnames";
+import { Component } from "react";
 
-import Icon from "metabase/components/Icon";
-import SnippetCollections from "metabase/entities/snippet-collections";
+import CS from "metabase/css/core/index.css";
+import { SnippetCollections } from "metabase/entities/snippet-collections";
+import { Ellipsified, Icon } from "metabase/ui";
 
-import CollectionOptionsButton from "./CollectionOptionsButton";
+import { SnippetCollectionMenu } from "./SnippetCollectionMenu";
 
 const ICON_SIZE = 16;
 
-@SnippetCollections.load({ id: (state, props) => props.item.id, wrapped: true })
-export default class CollectionRow extends React.Component {
+class CollectionRow extends Component {
   render() {
     const {
       snippetCollection: collection,
       setSnippetCollectionId,
+      setSidebarState,
     } = this.props;
-    const onSelectCollection = () => setSnippetCollectionId(collection.id);
+    const onSelectCollection = () => {
+      if (setSnippetCollectionId) {
+        setSnippetCollectionId(collection.id);
+      }
+    };
 
     return (
       <div
         className={cx(
-          { "bg-light-hover cursor-pointer": !collection.archived },
-          "hover-parent hover--visibility flex align-center py2 px3 text-brand",
+          { [cx(CS.bgLightHover, CS.cursorPointer)]: !collection.archived },
+          CS.hoverParent,
+          CS.hoverVisibility,
+          CS.flex,
+          CS.alignCenter,
+          CS.py2,
+          CS.px3,
+          CS.textBrand,
         )}
         {...(collection.archived ? undefined : { onClick: onSelectCollection })}
       >
-        <Icon name="folder" size={ICON_SIZE} style={{ opacity: 0.25 }} />
-        <span className="flex-full ml1 text-bold">{collection.name}</span>
-        <CollectionOptionsButton {...this.props} collection={collection} />
+        <Icon
+          name="folder"
+          size={ICON_SIZE}
+          style={{ opacity: 0.25 }}
+          className={CS.flexNoShrink}
+        />
+        <Ellipsified className={cx(CS.flexFull, CS.ml1, CS.textBold)} flex={1}>
+          {collection.name}
+        </Ellipsified>
+        <SnippetCollectionMenu
+          className={CS.flexNoShrink}
+          collection={collection}
+          onEditDetails={() => {
+            setSidebarState({ modalSnippetCollection: collection });
+          }}
+          onChangePermissions={() => {
+            setSidebarState({ permissionsModalCollectionId: collection.id });
+          }}
+        />
       </div>
     );
   }
 }
+
+// eslint-disable-next-line import/no-default-export -- deprecated usage
+export default SnippetCollections.load({
+  id: (state, props) => props.item.id,
+  wrapped: true,
+})(CollectionRow);

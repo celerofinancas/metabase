@@ -1,16 +1,20 @@
 (ns metabase.util.date-2.parse.builder
-  "Utility functions for programatically building a `DateTimeFormatter`. Easier to understand than chaining a hundred
+  "Utility functions for programmatically building a `DateTimeFormatter`. Easier to understand than chaining a hundred
   Java calls and trying to keep the structure straight.
 
   The basic idea here is you pass a number of `sections` to `formatter` to build a `DateTimeFormatter` — see
   `metabase.util.date-2.parse` for examples. Most of these sections are simple wrappers around corresponding
   `DateTimeFormatterBuilder` -- see
-  https://docs.oracle.com/javase/8/docs/api/java/time/format/DateTimeFormatterBuilder.html for documenation.
+  https://docs.oracle.com/javase/8/docs/api/java/time/format/DateTimeFormatterBuilder.html for documentation.
 
   TODO - this is a prime library candidate."
-  (:require [metabase.util.date-2.common :as common])
-  (:import [java.time.format DateTimeFormatter DateTimeFormatterBuilder SignStyle]
-           java.time.temporal.TemporalField))
+  (:require
+   [metabase.util.date-2.common :as u.date.common])
+  (:import
+   (java.time.format DateTimeFormatter DateTimeFormatterBuilder SignStyle)
+   (java.time.temporal TemporalField)))
+
+(set! *warn-on-reflection* true)
 
 (defprotocol ^:private Section
   (^:private apply-section [this builder]))
@@ -88,14 +92,14 @@
   (with-option-section :case-sensitivity :case-insensitive sections))
 
 (def ^:private ^SignStyle sign-style
-  (common/static-instances SignStyle))
+  (u.date.common/static-instances SignStyle))
 
 (defn- temporal-field ^TemporalField [x]
   (let [field (if (keyword? x)
-                (common/temporal-field x)
+                (u.date.common/temporal-field x)
                 x)]
     (assert (instance? TemporalField field)
-      (format "Invalid TemporalField: %s" (pr-str field)))
+            (format "Invalid TemporalField: %s" (pr-str field)))
     field))
 
 (defn value
@@ -121,7 +125,7 @@
 
 (defn fraction
   "Define a section for a fractional value, e.g. milliseconds or nanoseconds."
-  [temporal-field-name min-val-width max-val-width & {:keys [decimal-point?]}]
+  [temporal-field-name _min-val-width _max-val-width & {:keys [decimal-point?]}]
   (fn [^DateTimeFormatterBuilder builder]
     (.appendFraction builder (temporal-field temporal-field-name) 0 9 (boolean decimal-point?))))
 

@@ -1,23 +1,45 @@
 import { t } from "ttag";
+
+import { ForwardRefLink } from "metabase/common/components/Link";
 import {
-  PLUGIN_ADMIN_NAV_ITEMS,
-  PLUGIN_ADMIN_ROUTES,
   PLUGIN_ADMIN_USER_MENU_ITEMS,
   PLUGIN_ADMIN_USER_MENU_ROUTES,
+  PLUGIN_AUDIT,
 } from "metabase/plugins";
+import { Menu } from "metabase/ui";
+import { isInternalUser } from "metabase/utils/urls";
 import { hasPremiumFeature } from "metabase-enterprise/settings";
-import getAuditRoutes, { getUserMenuRotes } from "./routes";
 
-if (hasPremiumFeature("audit_app")) {
-  PLUGIN_ADMIN_NAV_ITEMS.push({ name: t`Audit`, path: "/admin/audit" });
-  PLUGIN_ADMIN_ROUTES.push(getAuditRoutes);
+import { InsightsLink } from "./components/InsightsLink";
+import { InsightsMenuItem } from "./components/InsightsMenuItem";
+import { getUserMenuRotes } from "./routes";
+import { isAuditDb } from "./utils";
 
-  PLUGIN_ADMIN_USER_MENU_ITEMS.push(user => [
-    {
-      title: t`Unsubscribe from all subscriptions / alerts`,
-      link: `/admin/people/${user.id}/unsubscribe`,
-    },
-  ]);
+/**
+ * Initialize audit app plugin features that depend on hasPremiumFeature.
+ */
+export function initializePlugin() {
+  if (hasPremiumFeature("audit_app")) {
+    // Add new menu item function
+    const menuItemFunction = (user) => [
+      <Menu.Item
+        component={ForwardRefLink}
+        to={
+          isInternalUser(user)
+            ? `/admin/people/${user.id}/unsubscribe`
+            : `/admin/people/tenants/people/${user.id}/unsubscribe`
+        }
+        key="unsubscribe"
+      >
+        {t`Unsubscribe from all subscriptions / alerts`}
+      </Menu.Item>,
+    ];
 
-  PLUGIN_ADMIN_USER_MENU_ROUTES.push(getUserMenuRotes);
+    PLUGIN_ADMIN_USER_MENU_ITEMS.push(menuItemFunction);
+    PLUGIN_ADMIN_USER_MENU_ROUTES.push(getUserMenuRotes);
+    PLUGIN_AUDIT.isEnabled = true;
+    PLUGIN_AUDIT.isAuditDb = isAuditDb;
+    PLUGIN_AUDIT.InsightsLink = InsightsLink;
+    PLUGIN_AUDIT.InsightsMenuItem = InsightsMenuItem;
+  }
 }

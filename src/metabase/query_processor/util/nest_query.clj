@@ -1,113 +1,139 @@
 (ns metabase.query-processor.util.nest-query
-  "Utility functions for raising/nesting parts of MBQL queries. Currently, this only has [[nest-expressions]], but in
-  the future hopefully we can generalize this a bit so we can do more things that require us to introduce another
-  level of nesting, e.g. support window functions.
+  "The [[nest-expressions]] query transformation (see docstring for more info).
 
-   (This namespace is here rather than in the shared MBQL lib because it relies on other QP-land utils like the QP
-  refs stuff.)"
-  (:require [medley.core :as m]
-            [metabase.api.common :as api]
-            [metabase.mbql.util :as mbql.u]
-            [metabase.plugins.classloader :as classloader]
-            [metabase.query-processor.error-type :as qp.error-type]
-            [metabase.query-processor.middleware.annotate :as annotate]
-            [metabase.query-processor.store :as qp.store]
-            [metabase.query-processor.util.add-alias-info :as add]
-            [metabase.util :as u]
-            [metabase.util.i18n :refer [tru]]))
+  TODO (Cam 10/22/25) -- this is a pure-MBQL-5 high-level query transformation, and almost certainly belongs in Lib
+  rather than in QP -- we should move it there. (This also applies
+  to [[metabase.query-processor.util.transformations.nest-breakouts]])."
+  (:refer-clojure :exclude [select-keys some])
+  (:require
+   [medley.core :as m]
+   [metabase.lib.core :as lib]
+   [metabase.lib.equality :as lib.equality]
+   [metabase.lib.schema :as lib.schema]
+   [metabase.lib.util.match :as lib.util.match]
+   [metabase.lib.walk :as lib.walk]
+   [metabase.util :as u]
+   [metabase.util.malli :as mu]
+   [metabase.util.performance :refer [select-keys some]]))
 
-(defn- joined-fields [inner-query]
-  (m/distinct-by
-   add/normalize-clause
-   (mbql.u/match (dissoc inner-query :source-query :source-metadata)
-     [:field _ (_ :guard :join-alias)]
-     &match)))
+;; Mark all Fields at the new top level as `:qp/ignore-coercion` so QP implementations know not to apply coercion
+;; or whatever to them a second time.
+;; In fact, we don't mark all Fields, only the ones we deem coercible. Marking all would make a bunch of tests
+;; fail, but it might still make sense. For example, #48721 would have been avoided by unconditional marking.
 
-(defn- add-joined-fields-to-fields [joined-fields source]
-  (cond-> source
-    (seq joined-fields) (update :fields (fn [fields]
-                                          (m/distinct-by add/normalize-clause (concat fields joined-fields))))))
+(defn- contains-expression-refs? [location]
+  (lib.util.match/match-lite location [:expression & _] true))
 
-(defn- nest-source [inner-query]
-  (classloader/require 'metabase.query-processor)
-  (let [source (as-> (select-keys inner-query [:source-table :source-query :source-metadata :joins :expressions]) source
-                 ;; preprocess this without a current user context so it's not subject to permissions checks. To get
-                 ;; here in the first place we already had to do perms checks to make sure the query we're transforming
-                 ;; is itself ok, so we don't need to run another check
-                 (binding [api/*current-user-id* nil]
-                   ((resolve 'metabase.query-processor/query->preprocessed) {:database (u/the-id (qp.store/database))
-                                                                             :type     :query
-                                                                             :query    source}))
-                 (add/add-alias-info source)
-                 (:query source)
-                 (dissoc source :limit)
-                 (add-joined-fields-to-fields (joined-fields inner-query) source))]
-    (-> inner-query
-        (dissoc :source-table :source-metadata :joins)
-        (assoc :source-query source))))
+(defn- should-nest-expressions? [query path]
+  (and (lib.walk/apply-f-for-stage-at-path lib/mbql-stage? query path)
+       (some (fn [f]
+               (contains-expression-refs? (lib.walk/apply-f-for-stage-at-path f query path)))
+             [lib/breakouts
+              lib/aggregations
+              lib/order-bys])))
 
-(defn- raise-source-query-expression-ref
-  "Convert an `:expression` reference from a source query into an appropriate `:field` clause for use in the surrounding
-  query."
-  [{:keys [expressions source-query], :as query} [_ expression-name opts :as clause]]
-  (let [expression-definition        (or (get expressions (keyword expression-name))
-                                         (throw (ex-info (tru "No expression named {0}" (pr-str expression-name))
-                                                         {:type            qp.error-type/invalid-query
-                                                          :expression-name expression-name
-                                                          :query           query})))
-        {base-type :base_type}       (some-> expression-definition annotate/infer-expression-type)
-        {::add/keys [desired-alias]} (mbql.u/match-one source-query
-                                       [:expression (_ :guard (partial = expression-name)) source-opts]
-                                       source-opts)]
-    [:field
-     (or desired-alias expression-name)
-     (assoc opts :base-type (or base-type :type/*))]))
+(def ^:private first-stage-keys
+  #{:expressions :joins :source-table :source-card :filters})
 
-(defn- rewrite-fields-and-expressions [query]
-  (mbql.u/replace query
-    ;; don't rewrite anything inside any source queries or source metadata.
-    (_ :guard (constantly (some (partial contains? (set &parents))
-                                [:source-query :source-metadata])))
-    &match
+;; TODO (Cam 10/22/25) -- somewhat duplicated with/copied
+;; from [[metabase.query-processor.util.transformations.nest-breakouts/fields-used-in-breakouts-aggregations-or-expressions]]
+(defn- fields-needed-by-second-stage [query path stage]
+  (let [stage' (apply dissoc stage first-stage-keys)
+        refs (volatile! (transient []))]
+    ;; temporarily disable enforcement since this stage is technically invalid since we removed all
+    ;; the [[first-stage-keys]]
+    (binding [lib.schema/*HACK-disable-ref-validation* true]
+      (lib.walk/walk-clauses-in-stage
+       stage'
+       (fn [clause]
+         (u/prog1 clause
+           (when (lib/clause-of-type? clause #{:field :expression})
+             ;; preserve the unbucketed/unbinned versions of things in the new first stage; we'll apply the
+             ;; binning/bucketing in the second stage instead
+             (let [unbucketed-ref (-> clause
+                                      (cond-> (lib/clause-of-type? clause :field) (lib/with-binning nil))
+                                      (lib/with-temporal-bucket nil)
+                                      ;; unset these just to be safe in case they were set -- they're technically
+                                      ;; allowed if the binning/bucketing is happening at this stage but they're no
+                                      ;; longer happening here so leaving them in place would be incorrect.
+                                      (lib/update-options dissoc
+                                                          :original-temporal-unit
+                                                          :lib/original-binning))]
+               (vswap! refs conj! unbucketed-ref)))))))
+    (into
+     []
+     (comp (m/distinct-by (fn [[tag opts id-or-name]]
+                            [tag
+                             (select-keys opts [:join-alias])
+                             id-or-name]))
+           ;; if you are a psycho and have both a Field ID ref and a Field name ref to the same column the we need to
+           ;; deduplicate those otherwise this is going to result in queries with duplicate column
+           ;; names (see [[literal-boolean-expressions-and-fields-in-conditions-test]])
+           (m/distinct-by (fn [a-ref]
+                            (-> (lib.walk/apply-f-for-stage-at-path lib/metadata query path a-ref)
+                                ((juxt :lib/source-column-alias lib/current-join-alias))))))
+     (persistent! @refs))))
 
-    :expression
-    (raise-source-query-expression-ref query &match)
+(defn- new-first-stage [query path stage]
+  (-> stage
+      (select-keys (conj first-stage-keys :lib/type))
+      (assoc :fields (lib/fresh-uuids (fields-needed-by-second-stage query path stage)))))
 
-    ;; mark all Fields at the new top level as `::outer-select` so QP implementations know not to apply coercion or
-    ;; whatever to them a second time.
-    [:field _id-or-name (_opts :guard (every-pred :temporal-unit (complement ::outer-select)))]
-    (recur (mbql.u/update-field-options &match assoc ::outer-select true))
+(defn- new-second-stage [query path stage]
+  (let [returned-cols (lib.walk/apply-f-for-stage-at-path lib/returned-columns query path)]
+    (letfn [(update-ref [a-ref]
+              (let [col            (lib.walk/apply-f-for-stage-at-path lib/metadata query path a-ref)
+                    unbucketed-col (-> col
+                                       (lib/with-binning nil)
+                                       (lib/with-temporal-bucket nil))
+                    returned-col   (m/find-first (partial lib.equality/= unbucketed-col) returned-cols)]
+                (-> returned-col
+                    lib/update-keys-for-col-from-previous-stage
+                    (lib/with-binning (lib/binning col))
+                    (lib/with-temporal-bucket (lib/raw-temporal-bucket col))
+                    lib/ref)))]
+      ;; temporarily disable enforcement since this stage will be invalid while we're messing with it... it will look
+      ;; pretty nice when we're done tho.
+      (binding [lib.schema/*HACK-disable-ref-validation* true]
+        (-> stage
+            (as-> $stage (apply dissoc $stage first-stage-keys))
+            (lib.walk/walk-clauses-in-stage
+             (fn [clause]
+               (cond-> clause
+                 (lib/clause-of-type? clause #{:field :expression})
+                 update-ref))))))))
 
-    [:field id-or-name (opts :guard :join-alias)]
-    (let [{::add/keys [desired-alias]} (mbql.u/match-one (:source-query query)
-                                         [:field
-                                          (_ :guard (partial = id-or-name))
-                                          (matching-opts :guard #(= (:join-alias %) (:join-alias opts)))]
-                                         matching-opts)]
-      [:field id-or-name (cond-> opts
-                           desired-alias (assoc ::add/source-alias desired-alias
-                                                ::add/desired-alias desired-alias))])
+(mu/defn- nest-expressions* :- [:sequential {:min 2, :max 2} ::lib.schema/stage.mbql]
+  [query :- ::lib.schema/query
+   path  :- ::lib.walk/path
+   stage :- ::lib.schema/stage.mbql]
+  (let [new-first-stage (new-first-stage query path stage)]
+    [new-first-stage
+     (new-second-stage (assoc-in query path new-first-stage) path stage)]))
 
-    ;; when recursing into joins use the refs from the parent level.
-    (m :guard (every-pred map? :joins))
-    (let [{:keys [joins]} m]
-      (-> (dissoc m :joins)
-          rewrite-fields-and-expressions
-          (assoc :joins (mapv (fn [join]
-                                (assoc join :qp/refs (:qp/refs query)))
-                              joins))))))
+(mu/defn nest-expressions :- ::lib.schema/query
+  "For queries with `expressions` in the final stage, adds an additional stage and moves the breakouts, aggregations,
+  and order bys into the new final stage. This is because lots of our SQL databases don't really like when you do
+  stuff like this:
 
-(defn nest-expressions
-  "Pushes the `:source-table`/`:source-query`, `:expressions`, and `:joins` in the top-level of the query into a
-  `:source-query` and updates `:expression` references and `:field` clauses with `:join-alias`es accordingly. See
-  tests for examples. This is used by the SQL QP to make sure expressions happen in a subselect."
-  [{:keys [expressions], :as query}]
-  (if (empty? expressions)
-    query
-    (let [{:keys [source-query], :as query} (nest-source query)
-          query                             (rewrite-fields-and-expressions query)
-          source-query                      (assoc source-query :expressions expressions)]
-      (-> query
-          (dissoc :source-query :expressions)
-          (assoc :source-query source-query)
-          add/add-alias-info))))
+    SELECT (x + ?) AS x_1
+    FROM my_table
+    GROUP BY (x + ?)
+    ORDER BY (x + ?) ASC
+
+  Why? They are dumb and can't figure out `x + ?` is the same thing. So instead we will introduce an additional stage
+  that will give us SQL that looks like this:
+
+    SELECT x_1 AS x_1
+    FROM (
+      SELECT (x + ?) AS x_1
+      FROM my_table
+    ) source
+    GROUP BY x_1
+    ORDER BY x_1 ASC"
+  [query :- ::lib.schema/query]
+  (lib.walk/walk-stages
+   query
+   (fn [query path stage]
+     (when (should-nest-expressions? query path)
+       (nest-expressions* query path stage)))))

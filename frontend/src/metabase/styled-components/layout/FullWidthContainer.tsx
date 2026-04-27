@@ -1,21 +1,17 @@
-import styled from "styled-components";
-import {
-  breakpointMinSmall,
-  breakpointMinMedium,
-} from "metabase/styled-components/theme";
+import cx from "classnames";
+import { forwardRef } from "react";
 
-export const FullWidthContainer = styled.div`
-  margin: 0 auto;
-  padding: 0 1em;
-  width: 100%;
+import { Box, type BoxProps } from "metabase/ui";
 
-  ${breakpointMinSmall} {
-    padding-left: 2em;
-    padding-right: 2em;
-  }
+import S from "./FullWidthContainer.module.css";
 
-  ${breakpointMinMedium} {
-    padding-left: 3em;
-    padding-right: 3em;
-  }
-`;
+export const FullWidthContainer = forwardRef<
+  HTMLDivElement,
+  BoxProps & { children: React.ReactNode }
+>(function FullWidthContainer(props, ref) {
+  const { className, ...rest } = props;
+
+  return (
+    <Box className={cx(S.FullWidthContainer, className)} {...rest} ref={ref} />
+  );
+});

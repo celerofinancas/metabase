@@ -1,6 +1,9 @@
 (function() {
-  window.MetabaseBootstrap    = JSON.parse(document.getElementById("_metabaseBootstrap").textContent);
-  window.MetabaseLocalization = JSON.parse(document.getElementById("_metabaseLocalization").textContent);
+  window.MetabaseBootstrap        = JSON.parse(document.getElementById("_metabaseBootstrap").textContent);
+  window.MetabaseUserLocalization = JSON.parse(document.getElementById("_metabaseUserLocalization").textContent);
+  window.MetabaseSiteLocalization = JSON.parse(document.getElementById("_metabaseSiteLocalization").textContent);
+  window.MetabaseUserColorScheme = JSON.parse(document.getElementById("_metabaseUserColorScheme").textContent);
+  window.MetabaseNonce            = JSON.parse(document.getElementById("_metabaseNonce").textContent);
 
   var configuredRoot = document.head.querySelector("meta[name='base-href']").content;
   var actualRoot = "/";

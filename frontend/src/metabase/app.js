@@ -1,56 +1,55 @@
-import "core-js/stable";
-import "regenerator-runtime/runtime";
+import "@mantine/core/styles.css";
+import "@mantine/dates/styles.css";
+import "@xyflow/react/dist/style.css";
 
-// Use of classList.add and .remove in Background and FitViewPort Hocs requires
-// this polyfill so that those work in older browsers
-import "classlist-polyfill";
+// This is conditionally aliased in the webpack config.
+// If EE isn't enabled, it loads an empty file.
+// Should be imported before any other metabase import
+import "ee-overrides";
 
-import "number-to-locale-string";
-
-// If enabled this monkeypatches `t` and `jt` to return blacked out
-// strings/elements to assist in finding untranslated strings.
-import "metabase/lib/i18n-debug";
+import "metabase/utils/dayjs";
 
 // set the locale before loading anything else
-import { loadLocalization } from "metabase/lib/i18n";
+import "metabase/utils/i18n";
 
 // NOTE: why do we need to load this here?
-import "metabase/lib/colors";
+import "metabase/ui/colors";
 
 // NOTE: this loads all builtin plugins
 import "metabase/plugins/builtin";
 
 // This is conditionally aliased in the webpack config.
 // If EE isn't enabled, it loads an empty file.
-import "ee-plugins"; // eslint-disable-line import/no-unresolved
+// Set CSP nonce for dynamic style injection (e.g. CodeMirror)
+import "metabase/utils/csp";
 
-import { PLUGIN_APP_INIT_FUCTIONS } from "metabase/plugins";
-
-import registerVisualizations from "metabase/visualizations/register";
-
-import React from "react";
-import ReactDOM from "react-dom";
-import { Provider } from "react-redux";
-import { ThemeProvider } from "styled-components";
-
-import { createTracker } from "metabase/lib/analytics";
-import MetabaseSettings from "metabase/lib/settings";
-
-import api from "metabase/lib/api";
-import { initializeEmbedding } from "metabase/lib/embed";
-
-import { getStore } from "./store";
-
-import { refreshSiteSettings } from "metabase/redux/settings";
-
-// router
-import { Router, useRouterHistory } from "react-router";
 import { createHistory } from "history";
+import { DragDropContextProvider } from "react-dnd";
+import { createRoot } from "react-dom/client";
+import { useRouterHistory } from "react-router";
 import { syncHistoryWithStore } from "react-router-redux";
 
-// drag and drop
-import HTML5Backend from "react-dnd-html5-backend";
-import { DragDropContextProvider } from "react-dnd";
+import { initializePlugins } from "ee-plugins";
+import { AppThemeProvider } from "metabase/AppThemeProvider";
+import { ModifiedBackend } from "metabase/common/components/dnd/ModifiedBackend";
+import registerDashboardVisualizations from "metabase/dashboard/visualizations/register";
+import { initializeInteractiveEmbedding } from "metabase/embedding/interactive-embedding";
+import { MetabotProvider } from "metabase/metabot/context";
+import { PLUGIN_APP_INIT_FUNCTIONS } from "metabase/plugins";
+import { refreshSiteSettings } from "metabase/redux/settings";
+import { GlobalStyles } from "metabase/styled-components/containers/GlobalStyles";
+import { EmotionCacheProvider } from "metabase/ui/components/theme/EmotionCacheProvider";
+import api from "metabase/utils/api";
+import { captureConsoleErrors } from "metabase/utils/errors";
+import { initTracing, rotateTraceId } from "metabase/utils/otel";
+import { MetabaseReduxProvider } from "metabase/utils/redux/custom-context";
+import MetabaseSettings from "metabase/utils/settings";
+import registerVisualizations from "metabase/visualizations/register";
+
+import { createTracker } from "./analytics";
+import { HistoryProvider } from "./history";
+import { RouterProvider } from "./router";
+import { getStore } from "./store";
 
 // remove trailing slash
 const BASENAME = window.MetabaseRoot.replace(/\/+$/, "");
@@ -62,45 +61,51 @@ const browserHistory = useRouterHistory(createHistory)({
   basename: BASENAME,
 });
 
-const theme = {
-  space: [4, 8, 16, 32, 64, 128],
-};
+initializePlugins();
 
 function _init(reducers, getRoutes, callback) {
   const store = getStore(reducers, browserHistory);
   const routes = getRoutes(store);
-  const history = syncHistoryWithStore(browserHistory, store);
+  const syncedHistory = syncHistoryWithStore(browserHistory, store);
+
   createTracker(store);
 
-  let root;
-  ReactDOM.render(
-    <Provider store={store} ref={ref => (root = ref)}>
-      <DragDropContextProvider backend={HTML5Backend} context={{ window }}>
-        <ThemeProvider theme={theme}>
-          <Router history={history}>{routes}</Router>
-        </ThemeProvider>
-      </DragDropContextProvider>
-    </Provider>,
-    document.getElementById("root"),
+  // Initialize distributed tracing if enabled via MB_TRACING_ENABLED.
+  // Uses bootstrap data so it's available before the first API call.
+  if (window.MetabaseBootstrap?.["tracing-enabled"]) {
+    initTracing();
+    // Rotate trace ID on route changes so all API calls within
+    // a single page view share one trace.
+    syncedHistory.listen(() => rotateTraceId());
+  }
+
+  initializeInteractiveEmbedding(store.dispatch);
+
+  const root = createRoot(document.getElementById("root"));
+
+  root.render(
+    <MetabaseReduxProvider store={store}>
+      <EmotionCacheProvider>
+        <DragDropContextProvider backend={ModifiedBackend} context={{ window }}>
+          <AppThemeProvider>
+            <GlobalStyles />
+            <MetabotProvider>
+              <HistoryProvider history={syncedHistory}>
+                <RouterProvider>{routes}</RouterProvider>
+              </HistoryProvider>
+            </MetabotProvider>
+          </AppThemeProvider>
+        </DragDropContextProvider>
+      </EmotionCacheProvider>
+    </MetabaseReduxProvider>,
   );
 
   registerVisualizations();
-
-  initializeEmbedding(store);
+  registerDashboardVisualizations();
 
   store.dispatch(refreshSiteSettings());
 
-  MetabaseSettings.on("user-locale", async locale => {
-    // reload locale definition and site settings with the new locale
-    await Promise.all([
-      loadLocalization(locale),
-      store.dispatch(refreshSiteSettings({ locale })),
-    ]);
-    // force re-render of React application
-    root.forceUpdate();
-  });
-
-  PLUGIN_APP_INIT_FUCTIONS.forEach(init => init({ root }));
+  PLUGIN_APP_INIT_FUNCTIONS.forEach((init) => init());
 
   window.Metabase = window.Metabase || {};
   window.Metabase.store = store;
@@ -118,3 +123,5 @@ export function init(...args) {
     document.addEventListener("DOMContentLoaded", () => _init(...args));
   }
 }
+
+captureConsoleErrors();

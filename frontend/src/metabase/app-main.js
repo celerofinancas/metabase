@@ -1,14 +1,16 @@
+// Enables hot reload in development and noop in production
+// MUST be imported BEFORE `react` and `react-dom`
+import "metabase-dev";
+
 import { push } from "react-router-redux";
 import _ from "underscore";
 
 import { init } from "metabase/app";
-import { getRoutes } from "metabase/routes";
-import reducers from "metabase/reducers-main";
-
-import api from "metabase/lib/api";
-
+import { mainReducers } from "metabase/reducers-main";
 import { setErrorPage } from "metabase/redux/app";
 import { clearCurrentUser } from "metabase/redux/user";
+import { getRoutes } from "metabase/routes";
+import api from "metabase/utils/api";
 
 // If any of these receives a 403, we should display the "not authorized" page.
 const NOT_AUTHORIZED_TRIGGERS = [
@@ -16,12 +18,11 @@ const NOT_AUTHORIZED_TRIGGERS = [
   /\/api\/collection\/\d+(?:\/items)?$/,
   /\/api\/card\/\d+$/,
   /\/api\/pulse\/\d+$/,
-  /\/api\/dataset$/,
 ];
 
-init(reducers, getRoutes, store => {
+init(mainReducers, getRoutes, (store) => {
   // received a 401 response
-  api.on("401", url => {
+  api.on("401", (url) => {
     if (url.indexOf("/api/user/current") >= 0) {
       return;
     }
@@ -39,8 +40,8 @@ init(reducers, getRoutes, store => {
   });
 
   // received a 403 response
-  api.on("403", url => {
-    if (NOT_AUTHORIZED_TRIGGERS.some(regex => regex.test(url))) {
+  api.on("403", (url) => {
+    if (NOT_AUTHORIZED_TRIGGERS.some((regex) => regex.test(url))) {
       return store.dispatch(setErrorPage({ status: 403 }));
     }
   });

@@ -1,49 +1,114 @@
-import React from "react";
-import _ from "underscore";
+import cx from "classnames";
+import type { CSSProperties } from "react";
+import { t } from "ttag";
 
-import Icon from "metabase/components/Icon";
-import { TabBar, Tab, RadioInput } from "./EditorTabs.styled";
+import type { DatasetEditorTab } from "metabase/redux/store";
+import { Icon } from "metabase/ui";
+
+import EditorTabsS from "./EditorTabs.module.css";
 
 type Props = {
   currentTab: string;
-  options: {
-    id: string;
-    name: string;
-    icon: string;
-  }[];
-  onChange: (optionId: string) => void;
+  disabledQuery: boolean;
+  disabledColumns: boolean;
+  onChange: (optionId: DatasetEditorTab) => void;
 };
 
-function EditorTabs({ currentTab, options, onChange, ...props }: Props) {
-  const inputId = "editor-tabs";
-
+export function EditorTabs({
+  currentTab,
+  disabledQuery,
+  disabledColumns,
+  onChange,
+}: Props) {
   return (
-    <TabBar {...props}>
-      {options.map(option => {
-        const selected = currentTab === option.id;
-        const id = `${inputId}-${option.id}`;
-        const labelId = `${id}-label`;
-        return (
-          <li key={option.id}>
-            <Tab id={labelId} htmlFor={id} selected={selected}>
-              <Icon name={option.icon} />
-              <RadioInput
-                id={id}
-                name={inputId}
-                value={option.id}
-                checked={selected}
-                onChange={() => {
-                  onChange(option.id);
-                }}
-                aria-labelledby={labelId}
-              />
-              <span data-testid={`${id}-name`}>{option.name}</span>
-            </Tab>
-          </li>
-        );
-      })}
-    </TabBar>
+    <ul
+      className={EditorTabsS.TabBar}
+      style={
+        {
+          // TODO: Re-write this component to use actual buttons and better semantic colors
+          "--active-tab-color": "var(--mb-color-text-hover)",
+          "--inactive-tab-color":
+            "color-mix(in srgb, var(--mb-color-text-hover) 30%, transparent )",
+        } as CSSProperties
+      }
+    >
+      <li>
+        <label
+          className={cx(EditorTabsS.Tab, {
+            [EditorTabsS.active]: currentTab === "query",
+            [EditorTabsS.inactive]: currentTab !== "query",
+            [EditorTabsS.disabled]: disabledQuery,
+          })}
+          htmlFor="editor-tabs-query"
+        >
+          <Icon name="sql" mr="10px" />
+          <input
+            className={EditorTabsS.RadioInput}
+            type="radio"
+            id="editor-tabs-query"
+            name="editor-tabs"
+            value="query"
+            checked={currentTab === "query"}
+            disabled={disabledQuery}
+            onChange={() => {
+              onChange("query");
+            }}
+            data-testid="editor-tabs-query"
+          />
+          <span data-testid="editor-tabs-query-name">{t`Query`}</span>
+        </label>
+      </li>
+
+      <li>
+        <label
+          className={cx(EditorTabsS.Tab, {
+            [EditorTabsS.active]: currentTab === "columns",
+            [EditorTabsS.inactive]: currentTab !== "columns",
+            [EditorTabsS.disabled]: disabledColumns,
+          })}
+          htmlFor="editor-tabs-columns"
+        >
+          <Icon name="notebook" mr="10px" />
+          <input
+            type="radio"
+            className={EditorTabsS.RadioInput}
+            id="editor-tabs-columns"
+            name="editor-tabs"
+            value="columns"
+            checked={currentTab === "columns"}
+            onChange={() => {
+              onChange("columns");
+            }}
+            disabled={disabledColumns}
+            data-testid="editor-tabs-columns"
+          />
+          <span data-testid="editor-tabs-columns-name">{t`Columns`}</span>
+        </label>
+      </li>
+      <li>
+        <label
+          className={cx(EditorTabsS.Tab, {
+            [EditorTabsS.active]: currentTab === "metadata",
+            [EditorTabsS.inactive]: currentTab !== "metadata",
+          })}
+          htmlFor="editor-tabs-metadata"
+        >
+          <Icon name="gear" mr="10px" />
+          <input
+            type="radio"
+            className={EditorTabsS.RadioInput}
+            id="editor-tabs-metadata"
+            name="editor-tabs"
+            value="metadata"
+            checked={currentTab === "metadata"}
+            onChange={() => {
+              onChange("metadata");
+            }}
+            data-testid="editor-tabs-metadata"
+          />
+          <span data-testid="editor-tabs-metadata-name">{t`Settings`}</span>
+        </label>
+      </li>
+    </ul>
   );
 }
-
-export default EditorTabs;

@@ -1,43 +1,54 @@
-import { createEntity } from "metabase/lib/entities";
-
+import {
+  metricApi,
+  useGetMetricQuery,
+  useListMetricsQuery,
+} from "metabase/api";
 import { MetricSchema } from "metabase/schema";
-import { color } from "metabase/lib/colors";
-import * as Urls from "metabase/lib/urls";
-
 import { getMetadata } from "metabase/selectors/metadata";
+import { color } from "metabase/ui/colors";
+import { createEntity, entityCompatibleQuery } from "metabase/utils/entities";
 
-const Metrics = createEntity({
+/**
+ * @deprecated use "metabase/api" instead
+ */
+export const Metrics = createEntity({
   name: "metrics",
   nameOne: "metric",
   path: "/api/metric",
   schema: MetricSchema,
 
-  objectActions: {
-    setArchived: (
-      { id },
-      archived,
-      { revision_message = archived ? "(Archive)" : "(Unarchive)" } = {},
-    ) => Metrics.actions.update({ id }, { archived, revision_message }),
-
-    // NOTE: DELETE not currently implemented
-    delete: null,
+  rtk: {
+    getUseGetQuery: () => ({
+      useGetQuery,
+    }),
+    useListQuery: useListMetricsQuery,
   },
 
-  objectSelectors: {
-    getName: metric => metric && metric.name,
-    getUrl: metric =>
-      Urls.tableRowsQuery(metric.database_id, metric.table_id, metric.id),
-    getColor: metric => color("accent1"),
-    getIcon: metric => ({ name: "sum" }),
+  api: {
+    list: (entityQuery, dispatch) =>
+      entityCompatibleQuery(
+        entityQuery,
+        dispatch,
+        metricApi.endpoints.listMetrics,
+      ),
+    get: (entityQuery, options, dispatch) =>
+      entityCompatibleQuery(
+        entityQuery.id,
+        dispatch,
+        metricApi.endpoints.getMetric,
+      ),
   },
 
   selectors: {
     getObject: (state, { entityId }) => getMetadata(state).metric(entityId),
   },
 
-  form: {
-    fields: [{ name: "name" }, { name: "description", type: "text" }],
+  objectSelectors: {
+    getName: (metric) => metric && metric.name,
+    getColor: () => color("summarize"),
   },
 });
 
-export default Metrics;
+const useGetQuery = ({ id }, options) => {
+  return useGetMetricQuery(id, options);
+};
